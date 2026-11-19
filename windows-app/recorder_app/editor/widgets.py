@@ -10,7 +10,7 @@ from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen, QPolyg
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QInputDialog, QLabel, QMenu, QScrollArea, QSizePolicy,
                                QSlider, QToolButton, QVBoxLayout, QWidget)
 
-from .model import Track
+from .model import Clip, Track
 from .summary import Summary
 
 if TYPE_CHECKING:
@@ -111,22 +111,35 @@ class Ruler(QWidget):
 
 
 # ====================================================================== sóng âm
+HEADER_H = 16
+C_HEADER = QColor(170, 186, 228)
+C_HEADER_SEL = QColor(120, 142, 210)
+C_HEADER_DRAG = QColor(90, 170, 110)
+C_CLIP_EDGE = QColor(80, 90, 120)
+
+
 class WaveView(QWidget):
     def __init__(self, editor: "EditorWindow", track: Track):
         super().__init__()
         self.editor = editor
         self.track = track
-        self.summary = Summary()
-        self.setMouseTracking(False)
+        self.summaries: dict[int, Summary] = {}
+        self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setCursor(Qt.IBeamCursor)
-        self._drag_anchor: int | None = None
+        self._sel_anchor: int | None = None
+        self._drag: dict | None = None
 
     def sample_at(self, x: float) -> int:
         return max(0, int(round(self.editor.h0 + x * self.editor.spp)))
 
     def x_of(self, sample: float) -> float:
         return (sample - self.editor.h0) / self.editor.spp
+
+    def header_clip(self, pos) -> Clip | None:
+        if pos.y() > HEADER_H:
+            return None
+        return self.track.clip_at(int(self.editor.h0 + pos.x() * self.editor.spp))
 
     # ------------------------------------------------------------ vẽ
     def paintEvent(self, ev):
@@ -135,41 +148,76 @@ class WaveView(QWidget):
         proj = ed.project
         p = QPainter(self)
         w, h = self.width(), self.height()
-        end_x = self.x_of(t.length)
         sel = t.selected and proj.has_selection
         sx1 = self.x_of(proj.sel_start) if sel else 0
         sx2 = self.x_of(proj.sel_end) if sel else 0
 
-        p.fillRect(0, 0, w, h, C_BG)
-        if end_x < w:
-            p.fillRect(QRectF(max(0, end_x), 0, w, h), C_BEYOND)
+        p.fillRect(0, 0, w, h, C_BEYOND)
         if sel:
-            p.fillRect(QRectF(sx1, 0, sx2 - sx1, h), C_BG_SEL)
-            if end_x < sx2:
-                p.fillRect(QRectF(max(end_x, sx1), 0, sx2 - max(end_x, sx1), h), C_BEYOND_SEL)
+            p.fillRect(QRectF(sx1, 0, sx2 - sx1, h), C_BEYOND_SEL)
 
-        self.summary.update(t)
-        chs = t.channels
-        lane_h = h / chs
-        gain = 1.0
-        for ch in range(chs):
-            top = ch * lane_h
-            mid = top + lane_h / 2
-            half = lane_h / 2 - 2
-            p.setPen(QColor(200, 200, 215))
-            p.drawLine(QLineF(0, mid, min(w, end_x), mid))
-            self._draw_channel(p, ch, mid, half * gain, w)
-            if ch > 0:
-                p.setPen(QColor(120, 120, 130))
-                p.drawLine(QLineF(0, top, w, top))
-            # vạch thang biên độ bên trái giống Audacity
-            p.setPen(QColor(150, 150, 160))
-            f = p.font()
-            f.setPointSize(7)
+        body_top = HEADER_H
+        body_h = h - HEADER_H
+        dragging = self._drag["clip"] if self._drag else None
+        alive = set()
+        for c in t.clips:
+            x1, x2 = self.x_of(c.offset), self.x_of(c.end)
+            if x2 < 0 or x1 > w:
+                continue
+            alive.add(c.id)
+            cx1, cx2 = max(0.0, x1), min(float(w), x2)
+            # thân clip
+            p.fillRect(QRectF(cx1, body_top, cx2 - cx1, body_h), C_BG)
+            if sel and sx2 > cx1 and sx1 < cx2:
+                p.fillRect(QRectF(max(sx1, cx1), body_top, min(sx2, cx2) - max(sx1, cx1), body_h), C_BG_SEL)
+            # thanh tiêu đề (kéo để di chuyển)
+            hc = C_HEADER_DRAG if c is dragging else (C_HEADER_SEL if t.selected else C_HEADER)
+            p.fillRect(QRectF(cx1, 0, cx2 - cx1, HEADER_H), hc)
+            p.setPen(QColor(30, 30, 60))
+            f = QFont(p.font())
+            f.setPointSize(8)
             p.setFont(f)
+            if cx2 - cx1 > 30:
+                p.drawText(QRectF(cx1 + 4, 0, cx2 - cx1 - 8, HEADER_H), Qt.AlignVCenter | Qt.AlignLeft,
+                           c.name or t.name)
+            # sóng âm
+            summ = self.summaries.get(c.id)
+            if summ is None:
+                summ = self.summaries[c.id] = Summary()
+            summ.update(c)
+            p.save()
+            p.setClipRect(QRectF(cx1, body_top, cx2 - cx1, body_h))
+            chs = t.channels
+            lane_h = body_h / chs
+            for ch in range(chs):
+                top = body_top + ch * lane_h
+                mid = top + lane_h / 2
+                half = lane_h / 2 - 2
+                p.setPen(QColor(200, 200, 215))
+                p.drawLine(QLineF(cx1, mid, cx2, mid))
+                self._draw_channel(p, c, summ, ch, mid, half, w)
+                if ch > 0:
+                    p.setPen(QColor(150, 150, 165))
+                    p.drawLine(QLineF(cx1, top, cx2, top))
+            p.restore()
+            # viền clip
+            p.setPen(QPen(C_CLIP_EDGE, 1))
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(QRectF(x1, 0, x2 - x1 - 1, h - 2))
+        for k in list(self.summaries):
+            if k not in alive and not any(c.id == k for c in t.clips):
+                del self.summaries[k]
+
+        # thang biên độ
+        p.setPen(QColor(110, 110, 125))
+        f = QFont(p.font())
+        f.setPointSize(7)
+        p.setFont(f)
+        lane_h = body_h / t.channels
+        for ch in range(t.channels):
+            top = body_top + ch * lane_h
             p.drawText(QPointF(2, top + 10), "1.0")
             p.drawText(QPointF(2, top + lane_h - 2), "-1.0")
-
         # con trỏ (khi không có vùng chọn)
         if t.selected and not proj.has_selection:
             cx = self.x_of(proj.sel_start)
@@ -186,23 +234,24 @@ class WaveView(QWidget):
             f.setPointSize(9)
             f.setBold(True)
             p.setFont(f)
-            p.drawText(QPointF(30, 14), "● ĐANG GHI" if t.recording else t.note)
+            p.drawText(QPointF(30, HEADER_H + 14), "● ĐANG GHI" if t.recording else t.note)
         p.setPen(QColor(110, 110, 120))
         p.drawLine(0, h - 1, w, h - 1)
 
-    def _draw_channel(self, p: QPainter, ch: int, mid: float, half: float, w: int):
+    def _draw_channel(self, p: QPainter, clip: Clip, summ: Summary, ch: int, mid: float, half: float, w: int):
         ed = self.editor
-        data = self.track.data
+        data = clip.data
         if not len(data):
             return
         spp = ed.spp
+        h0 = ed.h0 - clip.offset            # toạ độ trong clip
         if spp < 1.0:  # phóng to sát: vẽ từng mẫu
-            first = max(0, int(ed.h0) - 1)
-            last = min(len(data), int(ed.h0 + w * spp) + 2)
+            first = max(0, int(h0) - 1)
+            last = min(len(data), int(h0 + w * spp) + 2)
             if last <= first:
                 return
             ys = mid - np.clip(data[first:last, ch], -1, 1) * half
-            xs = (np.arange(first, last) - ed.h0) / spp
+            xs = (np.arange(first, last) - h0) / spp
             p.setPen(QPen(C_WAVE, 1))
             p.drawPolyline(QPolygonF([QPointF(float(x), float(y)) for x, y in zip(xs, ys)]))
             if spp < 0.2:
@@ -210,7 +259,7 @@ class WaveView(QWidget):
                 for x, y in zip(xs, ys):
                     p.drawEllipse(QPointF(float(x), float(y)), 2.5, 2.5)
             return
-        r = self.summary.columns(data, ch, ed.h0, spp, w)
+        r = summ.columns(data, ch, h0, spp, w)
         if r is None:
             return
         xs, mn, mx, rms = r
@@ -220,28 +269,42 @@ class WaveView(QWidget):
         p.setPen(QPen(C_WAVE, 1))
         p.drawLines([QLineF(float(x) + .5, float(a), float(x) + .5, float(b)) for x, a, b in zip(xs, y_top, y_bot)])
         rr = np.minimum(rms, np.minimum(mx, -mn).clip(min=0))
-        r_top = mid - rr * half
-        r_bot = mid + rr * half
         mask = rr * half >= 1
         if mask.any():
             p.setPen(QPen(C_RMS, 1))
-            p.drawLines([QLineF(float(x) + .5, float(a), float(x) + .5, float(b))
-                         for x, a, b in zip(xs[mask], r_top[mask], r_bot[mask])])
-        clip = (mx >= 0.999) | (mn <= -0.999)
-        if clip.any():
+            p.drawLines([QLineF(float(x) + .5, float(mid - r_ * half), float(x) + .5, float(mid + r_ * half))
+                         for x, r_ in zip(xs[mask], rr[mask])])
+        clip_px = (mx >= 0.999) | (mn <= -0.999)
+        if clip_px.any():
             p.setPen(QPen(C_CLIP, 1))
-            p.drawLines([QLineF(float(x) + .5, mid - half, float(x) + .5, mid + half) for x in xs[clip]])
+            p.drawLines([QLineF(float(x) + .5, mid - half, float(x) + .5, mid + half) for x in xs[clip_px]])
 
     # ------------------------------------------------------------ chuột
     def mousePressEvent(self, ev):
         ed = self.editor
-        if ev.button() != Qt.LeftButton or ed.is_recording:
+        if ed.is_recording:
             return
-        s = self.sample_at(ev.position().x())
+        pos = ev.position()
+        if ev.button() == Qt.RightButton:
+            self._context_menu(ev)
+            return
+        if ev.button() != Qt.LeftButton:
+            return
+        clip = self.header_clip(pos)
+        if clip is not None:   # bắt đầu kéo clip (Time Shift)
+            ed.player.stop()
+            self._drag = {"clip": clip, "orig": clip.offset, "gx": ev.globalPosition().x(),
+                          "snap": ed.project.snapshot("Di chuyển đoạn"), "moved": False}
+            for t in ed.project.tracks:
+                t.selected = t is self.track
+            ed.project.changed("selection")
+            self.setCursor(Qt.ClosedHandCursor)
+            return
+        s = self.sample_at(pos.x())
         proj = ed.project
         if ev.modifiers() & Qt.ShiftModifier:
             anchor = proj.sel_start if abs(s - proj.sel_end) < abs(s - proj.sel_start) else proj.sel_end
-            self._drag_anchor = anchor
+            self._sel_anchor = anchor
             self.track.selected = True
             proj.set_selection(anchor, s)
         else:
@@ -250,33 +313,135 @@ class WaveView(QWidget):
             else:
                 for t in proj.tracks:
                     t.selected = t is self.track
-            self._drag_anchor = s
+            self._sel_anchor = s
             self._anchor_track = self.track
             proj.set_selection(s, s)
         ed.on_cursor_moved()
 
     def mouseMoveEvent(self, ev):
-        if self._drag_anchor is None or not (ev.buttons() & Qt.LeftButton):
-            return
         ed = self.editor
-        x = ev.position().x()
+        pos = ev.position()
+        if not (ev.buttons() & Qt.LeftButton):
+            self.setCursor(Qt.OpenHandCursor if self.header_clip(pos) else Qt.IBeamCursor)
+            return
+        if self._drag is not None:
+            self._drag_to(ev)
+            return
+        if self._sel_anchor is None:
+            return
+        x = pos.x()
         if x > self.width():  # tự cuộn khi kéo ra ngoài
             ed.scroll_by_pixels(min(40, x - self.width()))
         elif x < 0:
             ed.scroll_by_pixels(max(-40, x))
-        s = self.sample_at(x)
-        ed.project.set_selection(self._drag_anchor, s)
-        # kéo dọc sang track khác → chọn thêm các track ở giữa
-        gy = self.mapToGlobal(ev.position().toPoint()).y()
+        ed.project.set_selection(self._sel_anchor, self.sample_at(x))
+        gy = self.mapToGlobal(pos.toPoint()).y()
         ed.select_tracks_between(getattr(self, "_anchor_track", self.track), gy)
 
+    def _drag_to(self, ev):
+        ed = self.editor
+        d = self._drag
+        clip = d["clip"]
+        proj = ed.project
+        src = next((t for t in proj.tracks if clip in t.clips), None)
+        if src is None:
+            return
+        new_off = d["orig"] + (ev.globalPosition().x() - d["gx"]) * ed.spp
+        # hít (snap) vào mép các clip khác, đầu dự án và vùng chọn
+        tol = 8 * ed.spp
+        edges = [0, proj.sel_start, proj.sel_end]
+        for t in proj.tracks:
+            for c in t.clips:
+                if c is not clip:
+                    edges += [c.offset, c.end]
+        best = None
+        for e in edges:
+            for cand in (e, e - clip.length):
+                dist = abs(new_off - cand)
+                if dist < tol and (best is None or dist < best[0]):
+                    best = (dist, cand)
+        if best:
+            new_off = best[1]
+        new_off = max(0, int(round(new_off)))
+        gy = int(ev.globalPosition().y())
+        dst = ed.panel.track_at_global_y(gy) or src
+        moved = proj.move_clip(clip, src, dst, new_off) if dst is not src else False
+        if not moved:
+            lo, hi = src.free_range(clip)   # cùng track: không vượt qua clip bên cạnh
+            new_off = min(max(new_off, lo), max(lo, hi - clip.length))
+            moved = proj.move_clip(clip, src, src, new_off)
+        if moved:
+            d["moved"] = d["moved"] or clip.offset != d["orig"] or dst is not src
+            if dst is not src:
+                for t in proj.tracks:
+                    t.selected = t is dst
+            ed.panel.repaint_waves()
+            ed.ruler.update()
+
     def mouseReleaseEvent(self, ev):
-        self._drag_anchor = None
+        if self._drag is not None:
+            d, self._drag = self._drag, None
+            if d["moved"]:
+                self.editor.project.push_snapshot(d["snap"])
+                self.editor.project.changed("data")
+                self.editor.status("Đã di chuyển đoạn (Ctrl+Z để hoàn tác)")
+            self.setCursor(Qt.OpenHandCursor)
+            self.editor.panel.repaint_waves()
+        self._sel_anchor = None
 
     def mouseDoubleClickEvent(self, ev):
-        for t in self.editor.project.tracks:
+        proj = self.editor.project
+        c = self.track.clip_at(self.sample_at(ev.position().x()))
+        for t in proj.tracks:
             t.selected = t is self.track
-        self.editor.project.set_selection(0, self.track.length)
+        if c is not None:
+            proj.set_selection(c.offset, c.end)     # nhấp đúp = chọn cả đoạn
+        else:
+            proj.set_selection(0, self.track.length)
+
+    def _context_menu(self, ev):
+        ed = self.editor
+        proj = ed.project
+        s = self.sample_at(ev.position().x())
+        clip = self.track.clip_at(s)
+        menu = QMenu(self)
+
+        def only_this():
+            for t in proj.tracks:
+                t.selected = t is self.track
+
+        def split_here():
+            only_this()
+            proj.set_selection(s, s)
+            ed.do_edit(proj.split, "Tách")
+
+        def select_clip():
+            only_this()
+            proj.set_selection(clip.offset, clip.end)
+
+        def rename_clip():
+            name, ok = QInputDialog.getText(self, "Đổi tên đoạn", "Tên:", text=clip.name or self.track.name)
+            if ok:
+                proj.push_undo("Đổi tên đoạn")
+                clip.name = name.strip()
+                proj.changed("data")
+
+        def join_all():
+            only_this()
+            proj.set_selection(s, s)
+            ed.do_edit(proj.join, "Gộp")
+
+        if clip is not None and clip.offset < s:
+            menu.addAction("Tách tại đây (Split)", split_here)
+        if clip is not None:
+            menu.addAction("Chọn cả đoạn", select_clip)
+            menu.addAction("Đổi tên đoạn...", rename_clip)
+            menu.addAction("Xoá đoạn này", lambda: proj.remove_clip(self.track, clip))
+        if len(self.track.clips) > 1:
+            menu.addAction("Gộp mọi đoạn của track (Join)", join_all)
+        menu.addSeparator()
+        menu.addAction("Tách tại khoảng lặng...", lambda: (only_this(), ed.split_at_silences()))
+        menu.exec(ev.globalPosition().toPoint())
 
     def wheelEvent(self, ev):
         mods = ev.modifiers()
@@ -386,7 +551,7 @@ class TrackControl(QFrame):
         self.gain.setToolTip(f"Âm lượng: {t.gain_db:+.1f} dB")
         self.pan.setToolTip(f"Cân bằng trái/phải: {t.pan * 100:+.0f}%")
         self.info.setText(f"{'Stereo' if t.channels == 2 else 'Mono'}, {self.editor.project.rate} Hz\n"
-                          f"32-bit float · {fmt_time(t.length / self.editor.project.rate, ms=False)}")
+                          f"{len(t.clips)} đoạn · {fmt_time(t.length / self.editor.project.rate, ms=False)}")
         pal = self.palette()
         pal.setColor(self.backgroundRole(), C_PANEL_SEL if t.selected else C_PANEL)
         self.setPalette(pal)

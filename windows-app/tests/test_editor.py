@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from recorder_app.audio_io import load_audio, save_audio  # noqa: E402
 from recorder_app.editor import effects as fx  # noqa: E402
-from recorder_app.editor.model import Project  # noqa: E402
+from recorder_app.editor.model import Clip, Project  # noqa: E402
 from recorder_app.editor.player import Player  # noqa: E402
 from recorder_app.editor.summary import Summary  # noqa: E402
 
@@ -28,7 +28,7 @@ def make_project():
 def test_cut_paste_undo_redo():
     p = make_project()
     t = p.tracks[0]
-    orig = t.data
+    orig = t.data.copy()
     p.set_selection(1000, 3000)
     assert p.cut()
     assert t.length == SR - 2000
@@ -39,7 +39,7 @@ def test_cut_paste_undo_redo():
     assert np.array_equal(t.data[:2000], orig[1000:3000])
     p.undo()  # bỏ dán
     p.undo()  # bỏ cắt
-    assert t.data is orig
+    assert np.array_equal(t.data, orig)
     p.redo()
     assert t.length == SR - 2000
 
@@ -50,11 +50,11 @@ def test_trim_silence_delete():
     p.set_selection(100, 600)
     p.silence()
     assert not t.data[100:600].any() and t.data[99] != 0
-    p.trim()
-    assert t.length == 500 and (p.sel_start, p.sel_end) == (0, 500)
-    p.set_selection(0, 100)
-    p.delete()
-    assert t.length == 400
+    p.trim()  # giữ nguyên vị trí như Audacity
+    assert len(t.clips) == 1 and t.clips[0].offset == 100 and t.clips[0].length == 500
+    p.set_selection(0, 200)
+    p.delete()  # xoá 100 mẫu trống + 100 mẫu đầu clip, phần sau dồn lại
+    assert t.clips[0].offset == 0 and t.clips[0].length == 400
 
 
 def test_effect_on_selection_only():
@@ -118,15 +118,17 @@ def test_player_render_and_loop():
 def test_recording_track_and_summary():
     p = Project(SR)
     t = p.add_track("rec", np.zeros((0, 1), np.float32))
-    t.begin_recording(prefix=1000)
+    c = Clip(1000, np.zeros((0, 1), np.float32))
+    c.begin_recording()
+    t.clips.append(c)
     s = Summary()
     for _ in range(50):
-        t.append(np.full((960, 1), 0.5, np.float32))
-        s.update(t)
-    assert t.length == 1000 + 50 * 960
-    xs, mn, mx, rms = s.columns(t.data, 0, 0.0, 1024.0, 100)
-    assert mx.max() == np.float32(0.5) and mn.min() == 0.0
-    t.end_recording()
+        c.append(np.full((960, 1), 0.5, np.float32))
+        s.update(c)
+    assert t.recording and t.length == 1000 + 50 * 960
+    xs, mn, mx, rms = s.columns(c.data, 0, 0.0, 1024.0, 100)
+    assert mx.max() == np.float32(0.5) and mn.min() == 0.5
+    c.end_recording()
     assert not t.recording and t.length == 1000 + 50 * 960
 
 
@@ -143,3 +145,102 @@ def test_project_save_load_and_audio_io():
         save_audio(d / f"o{ext}", p.mix(0, p.length), SR)
         data, sr = load_audio(d / f"o{ext}")
         assert sr == SR and len(data) >= SR - 10
+
+
+# ---------------------------------------------------------------- clip: tách / gộp / kéo
+def test_split_and_join():
+    p = make_project()
+    t = p.tracks[0]
+    orig = t.data.copy()
+    p.set_selection(10000, 20000)
+    assert p.split()
+    assert [(c.offset, c.length) for c in t.clips] == [(0, 10000), (10000, 10000), (20000, SR - 20000)]
+    assert np.array_equal(t.data, orig)          # tách không làm đổi âm thanh
+    p.set_selection(0, 0)
+    assert p.join()
+    assert len(t.clips) == 1 and np.array_equal(t.data, orig)
+    p.undo()
+    assert len(t.clips) == 3
+
+
+def test_split_delete_leaves_gap_and_split_new():
+    p = make_project()
+    t = p.tracks[0]
+    p.set_selection(10000, 20000)
+    assert p.split_delete()
+    assert [(c.offset, c.end) for c in t.clips] == [(0, 10000), (20000, SR)]
+    assert t.length == SR and not t.data[10000:20000].any()
+    p.undo()
+    t.selected = True
+    p.set_selection(10000, 20000)
+    assert p.split_new()
+    assert len(p.tracks) == 2
+    nt = p.tracks[1]
+    assert [(c.offset, c.end) for c in nt.clips] == [(10000, 20000)]
+    assert [(c.offset, c.end) for c in t.clips] == [(0, 10000), (20000, SR)]
+
+
+def test_move_clip_no_overlap_and_undo():
+    p = make_project()
+    t = p.tracks[0]
+    p.set_selection(24000, 24000)
+    p.split()
+    left, right = t.clips
+    snap = p.snapshot("Di chuyển đoạn")
+    assert not p.move_clip(right, t, t, 1000)            # đè lên clip trái → không cho
+    assert p.move_clip(right, t, t, 60000)               # dời sang phải, để lại khoảng trống
+    p.push_snapshot(snap)
+    assert t.length == 60000 + 24000 and not t.data[24000:60000].any()
+    other = p.add_track("B", np.zeros((10, 1), np.float32))
+    assert p.move_clip(right, t, other, 100)              # chuyển sang track khác
+    assert right in other.clips and right not in t.clips
+    p.undo()  # bỏ thêm track B
+    p.undo()  # bỏ di chuyển
+    assert right in t.clips and right.offset == 24000
+
+
+def test_ripple_delete_and_paste_across_clips():
+    p = Project(SR)
+    t = p.add_track("A", np.ones((100, 1), np.float32))
+    t.clips.append(Clip(200, np.full((100, 1), 0.5, np.float32)))
+    p.set_selection(50, 250)             # cắt qua khoảng trống
+    assert p.cut()
+    assert [(c.offset, c.end) for c in t.clips] == [(0, 50), (50, 100)]
+    clip = p.clipboard[0]
+    assert len(clip) == 200 and not clip[50:150].any()
+    p.set_selection(50, 50)
+    p.paste()
+    assert t.length == 300 and np.allclose(t.data[250:300], 0.5)
+
+
+def test_effect_across_clips_and_gap():
+    p = Project(SR)
+    t = p.add_track("A", np.full((100, 1), 0.5, np.float32))
+    t.clips.append(Clip(200, np.full((100, 1), 0.5, np.float32)))
+    p.apply_effect("fade", fx.fade_out)           # fade liền mạch qua cả 2 clip
+    d = t.data
+    assert d[0, 0] > d[99, 0] > d[200, 0] > d[299, 0]
+    p.apply_effect("speed", lambda x: fx.change_speed(x, SR, 100))   # đổi độ dài → từng clip
+    assert all(abs(c.length - 50) <= 2 for c in t.clips)
+    assert t.fits(t.clips[1].offset, t.clips[1].length, ignore=t.clips[1])
+
+
+def test_split_at_silences():
+    p = Project(SR)
+    tone = (0.5 * np.sin(np.arange(SR) / SR * 2 * np.pi * 300)).astype(np.float32)[:, None]
+    gap = np.zeros((SR, 1), np.float32)
+    p.add_track("A", np.concatenate([tone, gap, tone, gap, tone]))
+    n = p.split_at_silences(-40, 0.5, 0.1)
+    t = p.tracks[0]
+    assert n == 2 and len(t.clips) == 3
+    assert abs(t.clips[1].offset - int(2.0 * SR - 0.1 * SR)) < SR * 0.02
+
+
+def test_project_v2_roundtrip_with_clips():
+    p = make_project()
+    p.set_selection(10000, 20000)
+    p.split_delete()
+    d = Path(tempfile.mkdtemp())
+    p.save(d / "c.wrproj")
+    q = Project.load(d / "c.wrproj")
+    assert [(c.offset, c.end) for c in q.tracks[0].clips] == [(0, 10000), (20000, SR)]

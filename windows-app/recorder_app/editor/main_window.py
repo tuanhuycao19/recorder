@@ -23,7 +23,7 @@ from ..local_input import LocalRecorder, list_input_devices, list_output_devices
 from ..phone_server import PhoneServer, local_ipv4_addresses
 from . import effects as fx
 from .dialogs import NoiseReductionDialog, PreferencesDialog, ask_params
-from .model import PROJECT_EXT, Project
+from .model import PROJECT_EXT, Clip, Project
 from .player import Player
 from .widgets import CONTROL_W, Meter, Ruler, TracksPanel, fmt_time, parse_time
 
@@ -151,16 +151,23 @@ class EditorWindow(QMainWindow):
         self.a_loop.setToolTip("Phát lặp lại vùng chọn")
 
         # ---------- chỉnh sửa
-        P = self.project
+        def P_():
+            return self.project
         self.a_undo = A("Hoàn tác", self.undo, QKeySequence.Undo)
         self.a_redo = A("Làm lại", self.redo, "Ctrl+Y")
-        self.a_cut = A("Cắt", lambda: self._edit(P.cut, "Cắt"), QKeySequence.Cut)
-        self.a_copy = A("Sao chép", lambda: self._edit(P.copy, "Đã sao chép"), QKeySequence.Copy)
-        self.a_paste = A("Dán", lambda: self._edit(P.paste, "Dán"), QKeySequence.Paste)
-        self.a_delete = A("Xoá", lambda: self._edit(P.delete, "Xoá"), QKeySequence.Delete)
-        self.a_dup = A("Nhân bản thành track mới", lambda: self._edit(P.duplicate, "Nhân bản"), "Ctrl+D")
-        self.a_trim = A("Giữ lại vùng chọn (Trim)", lambda: self._edit(P.trim, "Trim"), "Ctrl+T")
-        self.a_silence = A("Làm im lặng vùng chọn", lambda: self._edit(P.silence, "Im lặng"), "Ctrl+L")
+        self.a_cut = A("Cắt", lambda: self._edit(P_().cut, "Cắt"), QKeySequence.Cut)
+        self.a_copy = A("Sao chép", lambda: self._edit(P_().copy, "Đã sao chép"), QKeySequence.Copy)
+        self.a_paste = A("Dán", lambda: self._edit(P_().paste, "Dán"), QKeySequence.Paste)
+        self.a_delete = A("Xoá", lambda: self._edit(P_().delete, "Xoá"), QKeySequence.Delete)
+        self.a_dup = A("Nhân bản thành track mới", lambda: self._edit(P_().duplicate, "Nhân bản"), "Ctrl+D")
+        self.a_trim = A("Giữ lại vùng chọn (Trim)", lambda: self._edit(P_().trim, "Trim"), "Ctrl+T")
+        self.a_silence = A("Làm im lặng vùng chọn", lambda: self._edit(P_().silence, "Im lặng"), "Ctrl+L")
+        self.a_split = A("Tách (Split)", lambda: self._edit(P_().split, "Tách"), "Ctrl+I")
+        self.a_split_del = A("Tách và xoá (để lại khoảng trống)", lambda: self._edit(P_().split_delete, "Tách và xoá"),
+                             "Ctrl+Alt+K")
+        self.a_split_new = A("Tách ra track mới", lambda: self._edit(P_().split_new, "Tách ra track mới"), "Ctrl+Alt+I")
+        self.a_join = A("Gộp (Join)", lambda: self._edit(P_().join, "Gộp"), "Ctrl+J")
+        self.a_silences = A("Tách tại khoảng lặng...", self.split_at_silences)
         self.a_selall = A("Chọn tất cả", lambda: self.project.select_all(), QKeySequence.SelectAll)
         self.a_selnone = A("Bỏ chọn", lambda: self.project.select_none(), "Ctrl+Shift+A")
         # ---------- xem
@@ -191,7 +198,8 @@ class EditorWindow(QMainWindow):
         et.setObjectName("edit")
         et.setToolButtonStyle(Qt.ToolButtonTextOnly)
         for a, txt in ((self.a_cut, "✂ Cắt"), (self.a_copy, "⧉ Chép"), (self.a_paste, "📋 Dán"),
-                       (self.a_trim, "⇤⇥ Trim"), (self.a_silence, "🔇 Im lặng"), (self.a_undo, "↶"),
+                       (self.a_trim, "⇤⇥ Trim"), (self.a_silence, "🔇 Im lặng"), (self.a_split, "⫶ Tách"),
+                       (self.a_join, "⇔ Gộp"), (self.a_undo, "↶"),
                        (self.a_redo, "↷"), (self.a_zin, "🔍+"), (self.a_zout, "🔍−"), (self.a_zsel, "⤡ Vùng chọn"),
                        (self.a_zfit, "⤢ Vừa")):
             btn_action = QAction(txt, self)
@@ -316,7 +324,8 @@ class EditorWindow(QMainWindow):
 
         m = mb.addMenu("&Sửa")
         for a in (self.a_undo, self.a_redo, None, self.a_cut, self.a_copy, self.a_paste, self.a_delete,
-                  self.a_dup, None, self.a_trim, self.a_silence, None, self.a_selall, self.a_selnone):
+                  self.a_dup, None, self.a_trim, self.a_silence, None, self.a_split, self.a_split_del,
+                  self.a_split_new, self.a_join, self.a_silences, None, self.a_selall, self.a_selnone):
             m.addSeparator() if a is None else m.addAction(a)
 
         m = mb.addMenu("&Xem")
@@ -367,7 +376,8 @@ class EditorWindow(QMainWindow):
                             "và chỉnh sửa nhiều track.")))
 
         self.edit_actions = [self.a_undo, self.a_redo, self.a_cut, self.a_copy, self.a_paste, self.a_delete,
-                             self.a_dup, self.a_trim, self.a_silence, self.a_repeat]
+                             self.a_dup, self.a_trim, self.a_silence, self.a_repeat, self.a_split,
+                             self.a_split_del, self.a_split_new, self.a_join, self.a_silences]
 
     # ================================================================== trạng thái chung
     @property
@@ -600,7 +610,9 @@ class EditorWindow(QMainWindow):
         p = self.project
         prefix = p.sel_start
         t = p.add_track(f"{label} {time.strftime('%H:%M:%S')}", np.zeros((0, channels), np.float32))
-        t.begin_recording(prefix)
+        clip = Clip(prefix, np.zeros((0, channels), np.float32), name=t.name)
+        clip.begin_recording()
+        t.clips.append(clip)
         p.set_selection(prefix, prefix)
         return t, prefix
 
@@ -658,11 +670,11 @@ class EditorWindow(QMainWindow):
         r, self.rec = self.rec, None
         if not r:
             return
-        t = r["track"]
+        t, clip = r["track"], self._rec_clip(r)
         if r["kind"] == "local":
             wav = r["recorder"].stop()
-            t.end_recording()
-            self._apply_final(t, r["prefix"], wav, r["session"], "May_tinh", replace=True)
+            clip.end_recording()
+            self._apply_final(t, clip, wav, r["session"], "May_tinh", replace=True)
         else:
             conn = self.server.connections.get(r["conn_id"])
             if conn:
@@ -676,17 +688,21 @@ class EditorWindow(QMainWindow):
         self._update_actions()
         self.project.changed("data")
 
+    @staticmethod
+    def _rec_clip(r: dict) -> Clip:
+        return r.setdefault("clip", r["track"].clips[0])
+
     def _finish_live(self, r: dict):
-        t = r["track"]
-        if t.recording:
-            t.end_recording()
+        t, clip = r["track"], self._rec_clip(r)
+        if clip.recording:
+            clip.end_recording()
         t.note = "⏳ Đang nhận file gốc từ điện thoại..."
-        self.pending_phone[r["session"]] = {"track": t, "prefix": r["prefix"], "live": t.data, "label": r["label"]}
+        self.pending_phone[r["session"]] = {"track": t, "clip": clip, "live": clip.data, "label": r["label"]}
         self.status("Đã dừng — đang nhận file gốc (chất lượng đầy đủ) từ điện thoại...", 0)
 
     def _append_pcm(self, pcm: bytes):
         r = self.rec
-        if not r or not r["track"].recording:
+        if not r or not self._rec_clip(r).recording:
             return
         ch = r.get("ch_in", 1)
         n = len(pcm) // (2 * ch)
@@ -696,10 +712,10 @@ class EditorWindow(QMainWindow):
         rate_in = r.get("rate_in", self.project.rate)
         if rate_in != self.project.rate:
             x = resample(x, rate_in, self.project.rate)
-        r["track"].append(x)
+        self._rec_clip(r).append(x)
 
-    def _apply_final(self, t, prefix: int, wav: Path, session: str, label: str, replace: bool):
-        """Thay dữ liệu track bằng file gốc (WAV không nén) và tự lưu MP3."""
+    def _apply_final(self, t, clip, wav: Path, session: str, label: str, replace: bool):
+        """Thay dữ liệu clip vừa ghi bằng file gốc (WAV không nén) và tự lưu MP3."""
         try:
             data, sr = load_audio(wav)
         except Exception as e:
@@ -710,9 +726,10 @@ class EditorWindow(QMainWindow):
             wav.unlink()
         except OSError:
             pass
-        if t is not None and t in self.project.tracks and replace:
-            t.set_data(np.concatenate([np.zeros((prefix, data.shape[1]), np.float32), data]))
-            t.note = ""
+        if t is not None and t in self.project.tracks and replace and clip in t.clips:
+            if data.shape[1] != t.channels:
+                t.channels = data.shape[1]
+            clip.set_data(data)
         elif t is None:
             self.project.add_track(f"{label} {session}", data)
         if t is not None:
@@ -755,10 +772,10 @@ class EditorWindow(QMainWindow):
         if self.rec:
             t = self.rec["track"]
             if appended:
-                self.ensure_visible(t.length)
+                self.ensure_visible(self._rec_clip(self.rec).end)
                 self.panel.repaint_waves()
                 self.ruler.update()
-            self.pos_lbl.setText(fmt_time(t.length / self.project.rate))
+            self.pos_lbl.setText(fmt_time(self._rec_clip(self.rec).end / self.project.rate))
             now = time.monotonic()
             if now - getattr(self, "_last_info", 0) > 0.5:
                 self._last_info = now
@@ -832,11 +849,11 @@ class EditorWindow(QMainWindow):
             self.progress.hide()
             pend = self.pending_phone.pop(kw["session"], None)
             if pend is None:  # file gửi lại từ lần ghi offline trên điện thoại
-                self._apply_final(None, 0, kw["wav_path"], kw["session"], conn.name, replace=False)
+                self._apply_final(None, None, kw["wav_path"], kw["session"], conn.name, replace=False)
                 return
-            t = pend["track"]
-            unchanged = t.data is pend["live"]
-            self._apply_final(t, pend["prefix"], kw["wav_path"], kw["session"], pend["label"], replace=unchanged)
+            unchanged = pend["clip"].data is pend["live"]
+            self._apply_final(pend["track"], pend["clip"], kw["wav_path"], kw["session"], pend["label"],
+                              replace=unchanged)
             if kw["source"] != "file":
                 self.status("⚠ Không nhận được file gốc, đã dùng bản truyền trực tiếp")
         elif name == "phone_recording_failed":
@@ -869,6 +886,22 @@ class EditorWindow(QMainWindow):
             return
         if not fn():
             self.status(f"{label}: hãy chọn một vùng trên track trước")
+
+    do_edit = _edit
+
+    def split_at_silences(self):
+        if not self._can_edit():
+            return
+        v = ask_params(self, "Tách tại khoảng lặng", [
+            ("thr", "Ngưỡng im lặng", -40.0, (-80, -10, 0, "dB")),
+            ("min", "Khoảng lặng tối thiểu", 0.5, (0.05, 30, 2, "giây")),
+            ("keep", "Giữ lại ở mỗi mép", 0.1, (0, 5, 2, "giây"))],
+            note="Tách các đoạn có tiếng thành clip riêng và bỏ phần im lặng ở giữa "
+                 "(áp cho vùng chọn, hoặc cả track nếu chưa chọn vùng).")
+        if v is None:
+            return
+        n = self.project.split_at_silences(v["thr"], v["min"], v["keep"])
+        self.status(f"Đã tách thêm {n} đoạn" if n else "Không tìm thấy khoảng lặng nào đủ dài")
 
     def undo(self):
         if self._can_edit():
@@ -933,7 +966,7 @@ class EditorWindow(QMainWindow):
         pk = 0.0
         for t in p.target_tracks():
             a, b = p.range_for(t)
-            pk = max(pk, fx.peak(t.data[a:b]))
+            pk = max(pk, fx.peak(t.render(a, b)))
         return pk
 
     def fx_amplify(self):
@@ -974,7 +1007,7 @@ class EditorWindow(QMainWindow):
         t = p.target_tracks()[0]
         a, b = p.range_for(t)
         try:
-            self.noise_profile = fx.noise_profile(t.data[a:b])
+            self.noise_profile = fx.noise_profile(t.render(a, b))
             self.status("Đã lấy mẫu nhiễu. Giờ chọn vùng cần lọc (hoặc bỏ chọn = cả track) rồi mở lại Giảm nhiễu.")
         except ValueError as e:
             QMessageBox.information(self, APP_NAME, str(e))

@@ -10,6 +10,11 @@
 - **Nhiều track**: mỗi lần ghi tạo track mới tại vị trí con trỏ; nhập thêm file MP3/WAV/FLAC/OGG (kéo thả được). Mỗi track có Tắt tiếng / Solo / âm lượng / cân bằng trái-phải, kéo mép dưới để đổi chiều cao.
 - **Sóng âm** giống Audacity (đỉnh + RMS, báo vỡ tiếng màu đỏ), phóng to tới từng mẫu, thước thời gian (bấm để phát từ đó), đồng hồ mức âm Ghi/Phát.
 - **Sửa**: Cắt / Chép / Dán / Xoá, Trim, Làm im lặng, Nhân bản, Hoàn tác/Làm lại (tối đa 50 bước).
+- **Đoạn (clip)** như Audacity: mỗi track gồm nhiều đoạn, giữa các đoạn có thể để trống.
+  - **Kéo đoạn**: giữ chuột trên thanh tiêu đề màu xanh của đoạn rồi kéo sang trái/phải, hoặc kéo xuống track khác (tự hít vào mép các đoạn khác; không cho đè lên nhau).
+  - **Tách (Split)** `Ctrl+I`: tách tại con trỏ hoặc 2 mép vùng chọn. **Tách và xoá** `Ctrl+Alt+K` (để lại khoảng trống), **Tách ra track mới** `Ctrl+Alt+I`, **Gộp (Join)** `Ctrl+J`.
+  - **Tách tại khoảng lặng**: tự cắt bản ghi dài thành các đoạn có tiếng, bỏ phần im lặng.
+  - Chuột phải trên đoạn: Tách tại đây / Chọn cả đoạn / Đổi tên / Xoá đoạn / Gộp. Nhấp đúp = chọn cả đoạn.
 - **Hiệu ứng**: Khuếch đại, Chuẩn hoá, Fade In/Out, Giảm nhiễu (2 bước: lấy mẫu nhiễu → lọc), Nén dải động, Tiếng vang, Đổi tốc độ, Đảo ngược, Đảo pha. **Tạo**: Im lặng, Âm (tone), Tiếng ồn trắng.
 - **Dự án**: lưu/mở `.wrproj` (giữ nguyên các track để sửa tiếp); xuất bản trộn hoặc vùng chọn ra MP3/WAV/FLAC.
 - Mỗi lần ghi xong vẫn tự lưu MP3 vào thư mục bản ghi (tắt được trong *Tệp → Tuỳ chọn*).
