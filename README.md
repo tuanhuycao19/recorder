@@ -9,7 +9,7 @@
 
 - **Nhiều track**: mỗi lần ghi tạo track mới tại vị trí con trỏ; nhập thêm file MP3/WAV/FLAC/OGG (kéo thả được). Mỗi track có Tắt tiếng / Solo / âm lượng / cân bằng trái-phải, kéo mép dưới để đổi chiều cao.
 - **Sóng âm** giống Audacity (đỉnh + RMS, báo vỡ tiếng màu đỏ), phóng to tới từng mẫu, thước thời gian (bấm để phát từ đó), đồng hồ mức âm Ghi/Phát.
-- **Sửa**: Cắt / Chép / Dán / Xoá, Trim, Làm im lặng, Nhân bản, Hoàn tác/Làm lại không giới hạn thao tác (50 bước).
+- **Sửa**: Cắt / Chép / Dán / Xoá, Trim, Làm im lặng, Nhân bản, Hoàn tác/Làm lại (tối đa 50 bước).
 - **Hiệu ứng**: Khuếch đại, Chuẩn hoá, Fade In/Out, Giảm nhiễu (2 bước: lấy mẫu nhiễu → lọc), Nén dải động, Tiếng vang, Đổi tốc độ, Đảo ngược, Đảo pha. **Tạo**: Im lặng, Âm (tone), Tiếng ồn trắng.
 - **Dự án**: lưu/mở `.wrproj` (giữ nguyên các track để sửa tiếp); xuất bản trộn hoặc vùng chọn ra MP3/WAV/FLAC.
 - Mỗi lần ghi xong vẫn tự lưu MP3 vào thư mục bản ghi (tắt được trong *Tệp → Tuỳ chọn*).
