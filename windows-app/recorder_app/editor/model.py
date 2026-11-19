@@ -293,6 +293,8 @@ class Project:
         self.clipboard_rate = rate
         self.path: Path | None = None
         self.modified = False
+        self.video = None                  # VideoInfo của video đang gắn (hình), hoặc None
+        self.video_path: str | None = None  # đường dẫn video đọc từ file dự án (để gắn lại khi mở)
         self.listeners: list[Callable[[str], None]] = []
 
     def changed(self, what: str = "data") -> None:
@@ -720,7 +722,8 @@ class Project:
 
     # ------------------------------------------------------------ lưu / mở dự án
     def save(self, path: Path) -> None:
-        meta = {"version": 2, "rate": self.rate, "tracks": []}
+        meta = {"version": 2, "rate": self.rate, "tracks": [],
+                "video": str(self.video.path) if self.video is not None else None}
         tmp = path.with_name(path.name + ".part")
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as z:
             for i, t in enumerate(self.tracks):
@@ -759,4 +762,5 @@ class Project:
                 t.clips = [Clip(int(off), d, name=n) for off, d, n in clips_meta]
                 p.tracks.append(t)
         p.path = path
+        p.video_path = meta.get("video")
         return p

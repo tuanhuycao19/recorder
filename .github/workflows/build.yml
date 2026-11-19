@@ -28,7 +28,7 @@ jobs:
         run: python -m pytest -q tests
       - name: Đóng gói EXE
         working-directory: windows-app
-        run: pyinstaller --noconfirm --onefile --windowed --name WifiRecorder main.py
+        run: pyinstaller --noconfirm --onefile --windowed --collect-all imageio_ffmpeg --name WifiRecorder main.py
       - uses: actions/upload-artifact@v4
         with:
           name: WifiRecorder-windows

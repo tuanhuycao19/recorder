@@ -4,3 +4,4 @@ numpy>=1.26
 lameenc>=1.7.0
 soundfile>=0.12.1
 soxr>=0.3.7
+imageio-ffmpeg>=0.5.1

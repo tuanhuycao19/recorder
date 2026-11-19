@@ -1,12 +1,13 @@
 """Các widget vẽ: thước thời gian, track (bảng điều khiển + sóng âm), đồng hồ mức âm."""
 from __future__ import annotations
 
+import bisect
 import math
 from typing import TYPE_CHECKING
 
 import numpy as np
 from PySide6.QtCore import QLineF, QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QInputDialog, QLabel, QMenu, QScrollArea, QSizePolicy,
                                QSlider, QToolButton, QVBoxLayout, QWidget)
 
@@ -624,9 +625,22 @@ class TracksPanel(QScrollArea):
         self.vbox.addStretch(1)
         self.setWidget(self.container)
         self.rows: dict[int, TrackRow] = {}
+        self.video_row: VideoRow | None = None
 
     def sync(self):
         """Đồng bộ các hàng với danh sách track của dự án (giữ lại hàng cũ nếu track còn)."""
+        has_video = self.editor.project.video is not None
+        if has_video and self.video_row is None:
+            self.video_row = VideoRow(self.editor)
+            self.vbox.insertWidget(0, self.video_row)
+            self.video_row.show()
+        elif not has_video and self.video_row is not None:
+            self.vbox.removeWidget(self.video_row)
+            self.video_row.deleteLater()
+            self.video_row = None
+        elif self.video_row is not None:
+            self.video_row.refresh()
+        base = 1 if self.video_row is not None else 0
         tracks = self.editor.project.tracks
         ids = {t.id for t in tracks}
         for tid in list(self.rows):
@@ -640,7 +654,7 @@ class TracksPanel(QScrollArea):
                 row = TrackRow(self.editor, t)
                 self.rows[t.id] = row
             self.vbox.removeWidget(row)
-            self.vbox.insertWidget(i, row)
+            self.vbox.insertWidget(base + i, row)
             row.show()
         self.refresh()
 
@@ -648,11 +662,15 @@ class TracksPanel(QScrollArea):
         for row in self.rows.values():
             row.control.refresh()
             row.wave.update()
+        if self.video_row is not None:
+            self.video_row.strip.update()
         self.container.update()
 
     def repaint_waves(self):
         for row in self.rows.values():
             row.wave.update()
+        if self.video_row is not None:
+            self.video_row.strip.update()
 
     def wave_width(self) -> int:
         return max(100, self.viewport().width() - CONTROL_W)
@@ -682,7 +700,7 @@ class _Container(QWidget):
         self.setPalette(pal)
 
     def paintEvent(self, ev):
-        if not self.editor.project.tracks:
+        if not self.editor.project.tracks and self.editor.project.video is None:
             p = QPainter(self)
             p.setPen(QColor(250, 250, 250))
             f = p.font()
@@ -690,7 +708,7 @@ class _Container(QWidget):
             p.setFont(f)
             p.drawText(self.rect().adjusted(0, 60, 0, 0), Qt.AlignHCenter | Qt.AlignTop,
                        "Bấm ● (R) để ghi âm từ micro hoặc điện thoại\n"
-                       "hoặc Tệp → Nhập âm thanh (Ctrl+Shift+I), hay kéo thả file vào đây")
+                       "hoặc Tệp → Nhập âm thanh / Nhập video, hay kéo thả file vào đây")
 
     def mousePressEvent(self, ev):
         if not self.editor.is_recording:
@@ -758,3 +776,178 @@ class Meter(QWidget):
     def mousePressEvent(self, ev):
         self.clipped = False
         self.update()
+
+
+# ====================================================================== video
+class VideoPreview(QWidget):
+    """Khung phát video (đồng bộ theo đầu phát / con trỏ)."""
+
+    def __init__(self):
+        super().__init__()
+        self.image: QImage | None = None
+        self.time_text = ""
+        self.placeholder = "Chưa có video\nTệp → Nhập video... (hoặc kéo thả file video vào cửa sổ)"
+        self.setMinimumSize(240, 150)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def set_frame(self, img: QImage | None, time_text: str = ""):
+        self.image = img
+        self.time_text = time_text
+        self.update()
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(0, 0, 0))
+        if self.image is None:
+            p.setPen(QColor(170, 170, 170))
+            p.drawText(self.rect(), Qt.AlignCenter, self.placeholder)
+            return
+        iw, ih = self.image.width(), self.image.height()
+        s = min(self.width() / iw, self.height() / ih)
+        w, h = iw * s, ih * s
+        target = QRectF((self.width() - w) / 2, (self.height() - h) / 2, w, h)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        p.drawImage(target, self.image)
+        if self.time_text:
+            f = p.font()
+            f.setPointSize(9)
+            f.setBold(True)
+            p.setFont(f)
+            r = QRectF(6, self.height() - 24, 110, 20)
+            p.fillRect(r, QColor(0, 0, 0, 150))
+            p.setPen(QColor(255, 255, 255))
+            p.drawText(r, Qt.AlignCenter, self.time_text)
+
+
+class VideoStrip(QWidget):
+    """Dải ảnh thu nhỏ của video trên dòng thời gian."""
+
+    def __init__(self, editor: "EditorWindow"):
+        super().__init__()
+        self.editor = editor
+        self.setCursor(Qt.IBeamCursor)
+        self._anchor = None
+
+    def paintEvent(self, ev):
+        ed = self.editor
+        info = ed.project.video
+        p = QPainter(self)
+        w, h = self.width(), self.height()
+        p.fillRect(0, 0, w, h, QColor(58, 60, 66))
+        if info is None:
+            return
+        rate = ed.project.rate
+        x0 = (0 - ed.h0) / ed.spp
+        x1 = (info.duration * rate - ed.h0) / ed.spp
+        span = QRectF(max(0.0, x0), 0, min(float(w), x1) - max(0.0, x0), h)
+        p.fillRect(span, QColor(20, 20, 24))
+        thumbs = ed.video_thumbs
+        if thumbs:
+            times = [t for t, _ in thumbs]
+            tw = thumbs[0][1].width()
+            th = thumbs[0][1].height()
+            y = (h - th) / 2
+            p.save()
+            p.setClipRect(span)
+            start = int(max(0.0, x0) - ((max(0.0, x0) - x0) % tw))
+            for x in range(start, int(min(w, x1)) + 1, tw):
+                t = (ed.h0 + (x + tw / 2) * ed.spp) / rate
+                k = bisect.bisect_left(times, t)
+                if k >= len(times) or (k > 0 and t - times[k - 1] < times[k] - t):
+                    k -= 1
+                p.drawImage(QPointF(x, y), thumbs[max(0, k)][1])
+            p.restore()
+        proj = ed.project
+        if proj.has_selection:
+            sx1 = (proj.sel_start - ed.h0) / ed.spp
+            sx2 = (proj.sel_end - ed.h0) / ed.spp
+            p.fillRect(QRectF(sx1, 0, sx2 - sx1, h), QColor(120, 150, 255, 90))
+        else:
+            cx = (proj.sel_start - ed.h0) / ed.spp
+            p.setPen(QColor(255, 255, 255))
+            p.drawLine(QLineF(cx, 0, cx, h))
+        if ed.playhead is not None:
+            x = (ed.playhead - ed.h0) / ed.spp
+            p.setPen(QPen(QColor(60, 220, 60), 2))
+            p.drawLine(QLineF(x, 0, x, h))
+
+    def _sample(self, x: float) -> int:
+        return max(0, int(self.editor.h0 + x * self.editor.spp))
+
+    def mousePressEvent(self, ev):
+        ed = self.editor
+        if ed.is_recording or ev.button() != Qt.LeftButton:
+            return
+        s = self._sample(ev.position().x())
+        self._anchor = s
+        for t in ed.project.tracks:
+            t.selected = True
+        ed.project.set_selection(s, s)
+        ed.on_cursor_moved()
+
+    def mouseMoveEvent(self, ev):
+        if self._anchor is not None and ev.buttons() & Qt.LeftButton:
+            self.editor.project.set_selection(self._anchor, self._sample(ev.position().x()))
+
+    def mouseReleaseEvent(self, ev):
+        self._anchor = None
+
+    def wheelEvent(self, ev):
+        dy = ev.angleDelta().y() or ev.angleDelta().x()
+        if ev.modifiers() & Qt.ControlModifier:
+            self.editor.zoom(1.25 if dy > 0 else 0.8, anchor_x=ev.position().x())
+            ev.accept()
+        elif ev.modifiers() & Qt.ShiftModifier or ev.angleDelta().x():
+            self.editor.scroll_by_pixels(-dy / 2)
+            ev.accept()
+        else:
+            ev.ignore()
+
+
+class VideoRow(QWidget):
+    HEIGHT = 66
+
+    def __init__(self, editor: "EditorWindow"):
+        super().__init__()
+        self.editor = editor
+        h = QHBoxLayout(self)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(0)
+        ctl = QFrame()
+        ctl.setFixedWidth(CONTROL_W)
+        ctl.setAutoFillBackground(True)
+        pal = ctl.palette()
+        pal.setColor(ctl.backgroundRole(), QColor(70, 72, 80))
+        ctl.setPalette(pal)
+        v = QVBoxLayout(ctl)
+        v.setContentsMargins(4, 3, 4, 3)
+        v.setSpacing(1)
+        top = QHBoxLayout()
+        close = QToolButton(text="✕")
+        close.setAutoRaise(True)
+        close.setToolTip("Bỏ video khỏi dự án (giữ âm thanh)")
+        close.setStyleSheet("color: white")
+        close.clicked.connect(editor.remove_video)
+        self.name = QLabel()
+        self.name.setStyleSheet("color: white; font-weight: bold")
+        top.addWidget(close)
+        top.addWidget(self.name, 1)
+        v.addLayout(top)
+        self.info = QLabel()
+        self.info.setStyleSheet("color: #ddd; font-size: 8pt")
+        v.addWidget(self.info)
+        v.addStretch(1)
+        self.strip = VideoStrip(editor)
+        h.addWidget(ctl)
+        h.addWidget(self.strip, 1)
+        self.setFixedHeight(self.HEIGHT)
+        self.refresh()
+
+    def refresh(self):
+        info = self.editor.project.video
+        if info is None:
+            return
+        self.name.setText("🎬 " + info.name)
+        self.name.setToolTip(str(info.path))
+        self.info.setText(f"{info.width}×{info.height} · {info.fps:g} fps\n{fmt_time(info.duration, ms=False)}")
+        self.strip.update()

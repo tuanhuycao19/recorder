@@ -16,6 +16,10 @@
   - **Tách tại khoảng lặng**: tự cắt bản ghi dài thành các đoạn có tiếng, bỏ phần im lặng.
   - Chuột phải trên đoạn: Tách tại đây / Chọn cả đoạn / Đổi tên / Xoá đoạn / Gộp. Nhấp đúp = chọn cả đoạn.
 - **Hiệu ứng**: Khuếch đại, Chuẩn hoá, Fade In/Out, Giảm nhiễu (2 bước: lấy mẫu nhiễu → lọc), Nén dải động, Tiếng vang, Đổi tốc độ, Đảo ngược, Đảo pha. **Tạo**: Im lặng, Âm (tone), Tiếng ồn trắng.
+- **Video**: *Tệp → Nhập video* (`Ctrl+Shift+V`, hoặc kéo thả MP4/MOV/MKV/AVI/WEBM...). Âm thanh của video thành track 🎬, phía trên có dải ảnh thu nhỏ và **khung phát video** đồng bộ theo đầu phát (kéo con trỏ là hình đổi theo; khi đang ghi âm, video cũng chạy để lồng tiếng).
+  - Cách thay tiếng cho video: ghi bằng điện thoại / nhập file âm thanh → kéo đoạn cho khớp hình → *Tắt tiếng* track 🎬 (nếu muốn bỏ tiếng gốc).
+  - *Tệp → Xuất video* (`Ctrl+Alt+E`): ra MP4/MOV/MKV với hình **giữ nguyên chất lượng** (không mã hoá lại) + âm thanh đã trộn (AAC). Có thể chỉ xuất vùng chọn (khi đó hình được mã hoá lại H.264).
+  - File dự án chỉ lưu đường dẫn tới video, không chép video vào.
 - **Dự án**: lưu/mở `.wrproj` (giữ nguyên các track để sửa tiếp); xuất bản trộn hoặc vùng chọn ra MP3/WAV/FLAC.
 - Mỗi lần ghi xong vẫn tự lưu MP3 vào thư mục bản ghi (tắt được trong *Tệp → Tuỳ chọn*).
 

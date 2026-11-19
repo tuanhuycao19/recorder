@@ -12,20 +12,22 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPixmap
+from PySide6.QtGui import QAction, QColor, QIcon, QImage, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (QApplication, QComboBox, QDockWidget, QFileDialog, QFrame, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QProgressBar,
+                               QProgressDialog,
                                QPushButton, QScrollBar, QStyle, QToolBar, QVBoxLayout, QWidget)
 
 from .. import __version__
 from ..audio_io import IMPORT_FILTER, load_audio, resample, save_audio
 from ..local_input import LocalRecorder, list_input_devices, list_output_devices
 from ..phone_server import PhoneServer, local_ipv4_addresses
+from .. import video as vid
 from . import effects as fx
 from .dialogs import NoiseReductionDialog, PreferencesDialog, ask_params
 from .model import PROJECT_EXT, Clip, Project
 from .player import Player
-from .widgets import CONTROL_W, Meter, Ruler, TracksPanel, fmt_time, parse_time
+from .widgets import CONTROL_W, Meter, Ruler, TracksPanel, VideoPreview, fmt_time, parse_time
 
 APP_NAME = "WiFi Recorder"
 RATES = [8000, 16000, 22050, 32000, 44100, 48000, 88200, 96000]
@@ -96,6 +98,14 @@ class EditorWindow(QMainWindow):
         self.last_effect = None
         self._hbar_guard = False
         self._last_play_pos = None
+        # video
+        self.video_thumbs: list[tuple[float, QImage]] = []
+        self._grabber = None
+        self._streamer = None
+        self._streaming = False
+        self._stream_last = -1
+        self._thumb_cancel = None
+        self._export_dlg = None
 
         self.server = PhoneServer(on_event=lambda n, **kw: self.events.put((n, kw)))
         try:
@@ -255,6 +265,15 @@ class EditorWindow(QMainWindow):
         sb.addWidget(self.pos_lbl)
         self.addToolBar(Qt.BottomToolBarArea, sb)
 
+        # ---------- dock khung phát video
+        vdock = QDockWidget("Video", self)
+        vdock.setObjectName("video")
+        self.video_view = VideoPreview()
+        vdock.setWidget(self.video_view)
+        self.addDockWidget(Qt.RightDockWidgetArea, vdock)
+        vdock.hide()
+        self.video_dock = vdock
+
         # ---------- dock danh sách bản ghi
         dock = QDockWidget("Bản ghi đã lưu", self)
         dock.setObjectName("recordings")
@@ -309,6 +328,7 @@ class EditorWindow(QMainWindow):
         m.addAction(A("Dự án mới", self.new_project, QKeySequence.New))
         m.addAction(A("Mở...", self.open_dialog, QKeySequence.Open))
         m.addAction(A("Nhập âm thanh (thêm track)...", self.import_dialog, "Ctrl+Shift+I"))
+        m.addAction(A("Nhập video...", self.import_video_dialog, "Ctrl+Shift+V"))
         m.addSeparator()
         m.addAction(A("Lưu dự án", self.save_project, QKeySequence.Save))
         m.addAction(A("Lưu dự án thành...", lambda: self.save_project(ask=True), "Ctrl+Shift+S"))
@@ -317,6 +337,8 @@ class EditorWindow(QMainWindow):
         m.addAction(A("Xuất WAV...", lambda: self.export_mix(".wav")))
         m.addAction(A("Xuất FLAC...", lambda: self.export_mix(".flac")))
         m.addAction(A("Xuất vùng chọn...", lambda: self.export_mix(".mp3", selection=True)))
+        self.a_export_video = A("Xuất video...", self.export_video_dialog, "Ctrl+Alt+E")
+        m.addAction(self.a_export_video)
         m.addSeparator()
         m.addAction(A("Tuỳ chọn...", self.preferences, "Ctrl+P"))
         m.addSeparator()
@@ -332,6 +354,7 @@ class EditorWindow(QMainWindow):
         for a in (self.a_zin, self.a_zout, self.a_zsel, self.a_zfit):
             m.addAction(a)
         m.addSeparator()
+        m.addAction(self.video_dock.toggleViewAction())
         m.addAction(self.rec_dock.toggleViewAction())
 
         m = mb.addMenu("&Phát/Ghi")
@@ -416,6 +439,7 @@ class EditorWindow(QMainWindow):
             self.a_paste.setEnabled(bool(p.clipboard))
             self.a_repeat.setEnabled(self.last_effect is not None)
         self.rate_combo.setEnabled(not p.tracks and not rec)
+        self.a_export_video.setEnabled(p.video is not None and not rec)
         self.source_combo.setEnabled(not rec)
         self.rec_channels.setEnabled(not rec)
         name = p.path.stem if p.path else "Chưa đặt tên"
@@ -448,6 +472,8 @@ class EditorWindow(QMainWindow):
     def on_cursor_moved(self):
         if not self.player.playing:
             self.pos_lbl.setText(fmt_time(self.project.sel_start / self.project.rate))
+            if self._grabber is not None and not self.is_recording:
+                self._grabber.request(self.project.sel_start / self.project.rate)
 
     def select_tracks_between(self, anchor_track, global_y: int):
         cur = self.panel.track_at_global_y(global_y)
@@ -784,6 +810,7 @@ class EditorWindow(QMainWindow):
                     row.control.refresh()
             self.rec_meter.set_levels(self._rec_level, self._rec_level)
             self._rec_level *= 0.7
+        self._sync_video()
         if self.player.playing:
             pos = self.player.position
             if pos != self._last_play_pos:
@@ -872,6 +899,35 @@ class EditorWindow(QMainWindow):
             self.status(f"Lỗi lưu MP3: {kw['error']}")
         elif name == "log":
             self.status(kw["message"])
+        elif name == "video_frame":
+            if not self._streaming and self.project.video is not None and kw["info"] is self.project.video:
+                self._show_frame(kw["data"], kw["t"])
+        elif name == "video_thumb":
+            if kw["info"] is self.project.video:
+                w, h = kw["size"]
+                img = QImage(kw["data"], w, h, 3 * w, QImage.Format_RGB888).copy()
+                self.video_thumbs.append((kw["t"], img))
+                if self.panel.video_row is not None:
+                    self.panel.video_row.strip.update()
+        elif name == "export_progress":
+            if self._export_dlg is not None:
+                self._export_dlg.setValue(int(kw["v"] * 1000))
+        elif name == "export_done":
+            if self._export_dlg is not None:
+                self._export_dlg.close()
+                self._export_dlg = None
+            self.status(f"Đã xuất video {kw['path']}", 15000)
+            if QMessageBox.question(self, APP_NAME, f"Đã xuất video:\n{kw['path']}\n\nMở thư mục chứa file?") \
+                    == QMessageBox.Yes:
+                open_path(Path(kw["path"]).parent)
+        elif name == "export_failed":
+            if self._export_dlg is not None:
+                self._export_dlg.close()
+                self._export_dlg = None
+            if kw["error"] != "Đã huỷ":
+                QMessageBox.critical(self, APP_NAME, f"Lỗi xuất video:\n{kw['error']}")
+            else:
+                self.status("Đã huỷ xuất video")
 
     # ================================================================== chỉnh sửa
     def _can_edit(self) -> bool:
@@ -1084,6 +1140,12 @@ class EditorWindow(QMainWindow):
         self.rate_combo.setCurrentText(str(p.rate))
         self.rate_combo.blockSignals(False)
         self.pending_phone.clear()
+        self._detach_video()
+        if p.video_path:
+            try:
+                self._attach_video(vid.probe(p.video_path))
+            except Exception as e:
+                QMessageBox.warning(self, APP_NAME, f"Không mở được video của dự án:\n{p.video_path}\n{e}")
         self._on_project_changed("tracks")
         self.zoom_fit()
 
@@ -1094,7 +1156,8 @@ class EditorWindow(QMainWindow):
 
     def open_dialog(self):
         f, _ = QFileDialog.getOpenFileName(self, "Mở", self.cfg["output_dir"],
-                                           f"Dự án và âm thanh (*{PROJECT_EXT} *.wav *.mp3 *.flac *.ogg *.aif *.aiff);;"
+                                           f"Dự án, âm thanh, video (*{PROJECT_EXT} *.wav *.mp3 *.flac *.ogg *.aif *.aiff "
+                                           f"{' '.join('*' + e for e in sorted(vid.VIDEO_EXTS))});;"
                                            f"Dự án WiFi Recorder (*{PROJECT_EXT});;{IMPORT_FILTER}")
         if f:
             self.open_any(Path(f))
@@ -1109,8 +1172,171 @@ class EditorWindow(QMainWindow):
                 self._set_project(Project.load(path))
             except Exception as e:
                 QMessageBox.critical(self, APP_NAME, f"Không mở được dự án:\n{e}")
+        elif vid.is_video(path):
+            self.import_video(path)
         else:
             self.import_files([path])
+
+    # ================================================================== video
+    def import_video_dialog(self):
+        f, _ = QFileDialog.getOpenFileName(self, "Nhập video", self.cfg.get("video_dir", self.cfg["output_dir"]),
+                                           vid.VIDEO_FILTER)
+        if f:
+            self.cfg["video_dir"] = str(Path(f).parent)
+            self.import_video(Path(f))
+
+    def import_video(self, path: Path):
+        if not self._can_edit():
+            return
+        if self.project.video is not None and QMessageBox.question(
+                self, APP_NAME, "Dự án đã có video. Thay bằng video mới?") != QMessageBox.Yes:
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            info = vid.probe(path)
+            data = vid.extract_audio(info, self.project.rate) if info.has_audio else None
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, APP_NAME, f"Không mở được video:\n{e}")
+            return
+        QApplication.restoreOverrideCursor()
+        if data is not None and len(data):
+            self.project.add_track(f"🎬 {path.stem}", data)
+        self._attach_video(info)
+        self.project.modified = True
+        self._on_project_changed("tracks")
+        self.zoom_fit()
+        self.status(f"Đã nhập video {info.name} ({info.width}×{info.height}, {fmt_time(info.duration)})"
+                    + ("" if info.has_audio else " — video không có âm thanh"))
+
+    def _attach_video(self, info):
+        self._detach_video()
+        self.project.video = info
+        size = info.preview_size()
+        self._grabber = vid.FrameGrabber(info, size, lambda t, b: self.events.put(
+            ("video_frame", {"info": info, "t": t, "data": b})))
+        self._streamer = vid.FrameStreamer(info, size)
+        self.video_thumbs = []
+        cancel = threading.Event()
+        self._thumb_cancel = cancel
+        tsize = info.thumb_size(54)
+        threading.Thread(target=lambda: vid.thumbnails(info, 54, lambda t, b: self.events.put(
+            ("video_thumb", {"info": info, "t": t, "data": b, "size": tsize})), cancel=cancel), daemon=True).start()
+        self.video_dock.show()
+        QTimer.singleShot(0, lambda: self.resizeDocks([self.video_dock, self.rec_dock], [380, 240], Qt.Vertical))
+        self._grabber.request(self.project.sel_start / self.project.rate)
+
+    def _detach_video(self):
+        if self._thumb_cancel is not None:
+            self._thumb_cancel.set()
+        if self._grabber is not None:
+            self._grabber.close()
+        if self._streamer is not None:
+            self._streamer.stop()
+        self._grabber = self._streamer = self._thumb_cancel = None
+        self._streaming = False
+        self.video_thumbs = []
+        self.project.video = None
+        self.video_view.set_frame(None)
+
+    def remove_video(self):
+        if self.project.video is None:
+            return
+        self._detach_video()
+        self.project.modified = True
+        self._on_project_changed("tracks")
+        self.status("Đã bỏ video khỏi dự án (track âm thanh vẫn giữ)")
+
+    def _show_frame(self, data: bytes, t: float):
+        st = self._streamer
+        if st is None:
+            return
+        img = QImage(data, st.w, st.h, 3 * st.w, QImage.Format_RGB888).copy()
+        self.video_view.set_frame(img, fmt_time(t))
+
+    def _sync_video(self):
+        """Khi đang phát/ghi: lấy khung hình theo đồng hồ âm thanh. Khi dừng: khung tại con trỏ."""
+        st = self._streamer
+        if st is None:
+            return
+        rate = self.project.rate
+        if self.player.playing:
+            pos = self.player.position
+        elif self.rec:
+            pos = self._rec_clip(self.rec).end
+        else:
+            pos = None
+        if pos is None:
+            if self._streaming:
+                self._streaming = False
+                st.stop()
+                self._grabber.request(self.project.sel_start / rate)
+            return
+        if not self._streaming or pos < self._stream_last - rate // 10:   # bắt đầu phát / lặp lại
+            st.start(pos / rate)
+            self._streaming = True
+        self._stream_last = pos
+        frame = st.frame_for(pos / rate)
+        if frame is not None:
+            self._show_frame(frame, pos / rate)
+        elif pos / rate >= self.project.video.duration:
+            self.video_view.set_frame(self.video_view.image, fmt_time(pos / rate) + " (hết video)")
+
+    def export_video_dialog(self):
+        info = self.project.video
+        if info is None or not self._can_edit():
+            return
+        p = self.project
+        fields = [("fmt", "Định dạng", "mp4", [e[1:] for e in vid.EXPORT_FORMATS])]
+        if p.has_selection:
+            fields.append(("sel", "Chỉ xuất vùng chọn", False, None))
+        fields.append(("reenc", "Mã hoá lại hình (chậm hơn; chỉ cần khi file xuất bị lỗi)", False, None))
+        v = ask_params(self, "Xuất video", fields,
+                       note="Hình lấy từ video gốc (giữ nguyên chất lượng), âm thanh là bản trộn của tất cả "
+                            "track đang bật. Muốn bỏ tiếng gốc của video: bấm 'Tắt tiếng' track 🎬.\n"
+                            f"Độ dài video: {fmt_time(info.duration)}")
+        if v is None:
+            return
+        ext = "." + v["fmt"]
+        f, _ = QFileDialog.getSaveFileName(self, "Xuất video",
+                                           str(Path(self.cfg["output_dir"]) / (info.path.stem + "_da_sua" + ext)),
+                                           vid.EXPORT_FORMATS[ext])
+        if not f:
+            return
+        out = Path(f)
+        if out.suffix.lower() not in vid.EXPORT_FORMATS:
+            out = out.with_suffix(ext)
+        if out.resolve() == info.path.resolve():
+            QMessageBox.warning(self, APP_NAME, "Không thể ghi đè lên chính video gốc. Hãy chọn tên khác.")
+            return
+        rate = p.rate
+        if v.get("sel"):
+            start, end = p.sel_start / rate, min(p.sel_end / rate, info.duration)
+        else:
+            start, end = 0.0, info.duration
+        if end <= start:
+            QMessageBox.information(self, APP_NAME, "Vùng chọn nằm ngoài độ dài video.")
+            return
+        audio = p.mix(int(start * rate), int(round(end * rate)), channels=2)
+        cancel = threading.Event()
+        dlg = QProgressDialog("Đang xuất video...", "Huỷ", 0, 1000, self)
+        dlg.setWindowTitle("Xuất video")
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.canceled.connect(cancel.set)
+        dlg.setValue(0)
+        self._export_dlg = dlg
+        bitrate = max(192, int(self.cfg["bitrate"]))
+
+        def work():
+            try:
+                vid.export_video(info, audio, rate, out, start=start, end=end, reencode=v["reenc"],
+                                 audio_bitrate=bitrate,
+                                 progress=lambda x: self.events.put(("export_progress", {"v": x})), cancel=cancel)
+                self.events.put(("export_done", {"path": str(out)}))
+            except Exception as e:
+                self.events.put(("export_failed", {"error": str(e)}))
+        threading.Thread(target=work, daemon=True).start()
 
     def import_dialog(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Nhập âm thanh", self.cfg["output_dir"], IMPORT_FILTER)
@@ -1280,8 +1506,11 @@ class EditorWindow(QMainWindow):
     def dropEvent(self, ev):
         paths = [Path(u.toLocalFile()) for u in ev.mimeData().urls() if u.isLocalFile()]
         proj = [p for p in paths if p.suffix.lower() == PROJECT_EXT]
+        videos = [p for p in paths if vid.is_video(p)]
         if proj:
             self.open_any(proj[0])
+        elif videos:
+            self.import_video(videos[0])
         else:
             self.import_files(paths)
 
@@ -1296,6 +1525,7 @@ class EditorWindow(QMainWindow):
             return
         self._save_cfg()
         self.player.stop()
+        self._detach_video()
         self.server.stop()
         ev.accept()
 
