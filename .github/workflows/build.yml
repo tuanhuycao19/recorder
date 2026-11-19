@@ -42,7 +42,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v3
+      # Runner ubuntu-latest đã có sẵn Android SDK (ANDROID_HOME); AGP tự tải platform còn thiếu
       - name: Build APK
         working-directory: android-app
         run: ./gradlew --no-daemon assembleRelease
