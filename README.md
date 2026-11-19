@@ -2,8 +2,19 @@
 
 Ứng dụng thu âm trên Windows, dùng được **điện thoại Android làm micro qua WiFi**.
 
-- **App Windows** (`windows-app/`): chọn nguồn thu (micro máy tính hoặc điện thoại đã kết nối), bấm Ghi/Dừng, lưu **MP3** (128–320 kbps), xem mức âm, quản lý danh sách bản ghi.
+- **App Windows** (`windows-app/`): giao diện chỉnh sửa kiểu Audacity — ghi âm từ micro máy tính hoặc điện thoại thẳng vào track, sửa nhiều track, áp hiệu ứng, xuất **MP3** (128–320 kbps) / WAV / FLAC.
 - **App Android** (`android-app/`, file APK): biến điện thoại thành micro không dây. Tự tìm máy tính trong mạng WiFi, nhận lệnh ghi/dừng từ máy tính, hoặc tự ghi ngay trên điện thoại.
+
+## Trình chỉnh sửa (app Windows)
+
+- **Nhiều track**: mỗi lần ghi tạo track mới tại vị trí con trỏ; nhập thêm file MP3/WAV/FLAC/OGG (kéo thả được). Mỗi track có Tắt tiếng / Solo / âm lượng / cân bằng trái-phải, kéo mép dưới để đổi chiều cao.
+- **Sóng âm** giống Audacity (đỉnh + RMS, báo vỡ tiếng màu đỏ), phóng to tới từng mẫu, thước thời gian (bấm để phát từ đó), đồng hồ mức âm Ghi/Phát.
+- **Sửa**: Cắt / Chép / Dán / Xoá, Trim, Làm im lặng, Nhân bản, Hoàn tác/Làm lại không giới hạn thao tác (50 bước).
+- **Hiệu ứng**: Khuếch đại, Chuẩn hoá, Fade In/Out, Giảm nhiễu (2 bước: lấy mẫu nhiễu → lọc), Nén dải động, Tiếng vang, Đổi tốc độ, Đảo ngược, Đảo pha. **Tạo**: Im lặng, Âm (tone), Tiếng ồn trắng.
+- **Dự án**: lưu/mở `.wrproj` (giữ nguyên các track để sửa tiếp); xuất bản trộn hoặc vùng chọn ra MP3/WAV/FLAC.
+- Mỗi lần ghi xong vẫn tự lưu MP3 vào thư mục bản ghi (tắt được trong *Tệp → Tuỳ chọn*).
+
+Phím tắt chính (giống Audacity): `Space` phát/dừng, `R` ghi, `P` tạm dừng, `Ctrl+Z/Y`, `Ctrl+X/C/V`, `Delete`, `Ctrl+T` trim, `Ctrl+L` im lặng, `Ctrl+1/3` phóng to/thu nhỏ, `Ctrl+F` vừa cửa sổ, `Ctrl + lăn chuột` phóng to tại chuột. Xem đủ trong *Trợ giúp → Phím tắt* (F1).
 
 ## Vì sao chất lượng tốt
 
@@ -42,7 +53,7 @@ Mẹo:
 
 ## Chạy / build từ mã nguồn
 
-**Windows app** (Python 3.10+):
+**Windows app** (Python 3.10+, giao diện PySide6/Qt):
 
 ```bat
 cd windows-app
@@ -50,7 +61,7 @@ run.bat          :: chạy trực tiếp
 build.bat        :: đóng gói dist\WifiRecorder.exe
 ```
 
-Test: `python -m pytest windows-app/tests` (giả lập điện thoại, kiểm tra cả trường hợp lỗi CRC và mất kết nối).
+Test: `python -m pytest windows-app/tests` (giả lập điện thoại + kiểm tra cắt/dán/undo, hiệu ứng, trộn, lưu dự án).
 
 **Android app** (JDK 17 + Android SDK, hoặc mở thư mục `android-app` bằng Android Studio):
 

@@ -191,6 +191,7 @@ class PhoneConnection:
             if self._live_wav is not None:
                 self._live_wav.writeframesraw(pcm)
                 self._live_bytes += len(pcm)
+        self.server.emit("phone_audio", conn=self, pcm=pcm)
         self.server.emit("phone_level", conn=self, level=peak_level(pcm))
 
     # ------------------------------------------------------------ nhận file

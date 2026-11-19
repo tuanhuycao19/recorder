@@ -34,12 +34,13 @@ def list_input_devices() -> list[tuple[int, str]]:
 
 class LocalRecorder:
     def __init__(self, device: int, sample_rate: int, channels: int, wav_path: Path,
-                 on_level: Callable[[float], None]):
+                 on_level: Callable[[float], None], on_chunk: Callable[[bytes], None] | None = None):
         self.device = device
         self.sample_rate = sample_rate
         self.channels = channels
         self.wav_path = Path(wav_path)
         self.on_level = on_level
+        self.on_chunk = on_chunk
         self._q: queue.Queue[bytes | None] = queue.Queue()
         self._stream = None
         self._writer: threading.Thread | None = None
@@ -75,6 +76,8 @@ class LocalRecorder:
                     break
                 w.writeframesraw(data)
                 self.on_level(peak_level(data))
+                if self.on_chunk:
+                    self.on_chunk(data)
 
     def stop(self) -> Path:
         if self._stream is not None:
@@ -84,3 +87,19 @@ class LocalRecorder:
         if self._writer:
             self._writer.join()
         return self.wav_path
+
+
+def list_output_devices() -> list[tuple[int, str]]:
+    try:
+        sd = _sd()
+        devices = sd.query_devices()
+        hostapis = sd.query_hostapis()
+    except Exception:
+        return []
+    out = []
+    for idx, d in enumerate(devices):
+        if d.get("max_output_channels", 0) > 0:
+            api = hostapis[d["hostapi"]]["name"]
+            if api in ("MME", "Windows WASAPI") or not api.startswith(("Windows", "MME")):
+                out.append((idx, f"{d['name']} [{api}]"))
+    return out
