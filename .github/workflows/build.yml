@@ -1,0 +1,69 @@
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-app:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cài thư viện
+        working-directory: windows-app
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller pytest
+      - name: Test
+        working-directory: windows-app
+        run: python -m pytest -q tests
+      - name: Đóng gói EXE
+        working-directory: windows-app
+        run: pyinstaller --noconfirm --onefile --windowed --name WifiRecorder main.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WifiRecorder-windows
+          path: windows-app/dist/WifiRecorder.exe
+
+  android-app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - name: Build APK
+        working-directory: android-app
+        run: ./gradlew --no-daemon assembleRelease
+      - name: Đổi tên APK
+        run: cp android-app/app/build/outputs/apk/release/app-release.apk WifiRecorder.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WifiRecorder-android
+          path: WifiRecorder.apk
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows-app, android-app]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/WifiRecorder.exe
+            dist/WifiRecorder.apk
