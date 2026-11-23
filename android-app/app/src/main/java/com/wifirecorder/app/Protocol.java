@@ -23,6 +23,8 @@ final class Protocol {
     static final int MSG_PING = 9;
     static final int MSG_ERROR = 10;
     static final int MSG_FILE_ACK = 11;
+    static final int MSG_PONG = 12;
+    static final int MSG_TIMING = 13;
 
     static final int MAX_PAYLOAD = 16 * 1024 * 1024;
 

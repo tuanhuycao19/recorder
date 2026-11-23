@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 import numpy as np
 
@@ -22,6 +23,8 @@ class Player:
         self.level = (0.0, 0.0)
         self.device = None         # None = thiết bị mặc định
         self.error: str | None = None
+        # (vị trí mẫu, thời điểm perf_counter_ns mẫu đó ra tới loa) — để căn bản ghi overdub
+        self.dac_ref: tuple[int, int] | None = None
 
     def set_project(self, project: Project) -> None:
         self.stop()
@@ -37,7 +40,8 @@ class Player:
         self.start_pos, self.end_pos, self.position = start, end, start
         self.loop = loop
         self.paused = False
-        self._tracks = list(p.tracks)
+        self.dac_ref = None
+        self._tracks = [t for t in p.tracks if not t.recording]   # không phát lại chính track đang ghi
         try:
             import sounddevice as sd
             self._stream = sd.OutputStream(samplerate=p.rate, channels=2, dtype="float32",
@@ -92,11 +96,26 @@ class Player:
 
     def _callback(self, outdata, frames, time_info, status):
         import sounddevice as sd
+        if self.dac_ref is None and not self.paused:
+            self.dac_ref = (self.position, time.perf_counter_ns() + int(self._output_delay(time_info) * 1e9))
         data = self.render(frames)
         np.clip(data, -1.0, 1.0, out=data)
         outdata[:] = data
         if not self.paused and self.position >= self.end_pos and not self.loop:
             raise sd.CallbackStop
+
+    def _output_delay(self, time_info) -> float:
+        """Thời gian từ lúc callback chạy tới khi mẫu đầu của buffer phát ra loa (giây)."""
+        try:
+            d = float(time_info.outputBufferDacTime) - float(time_info.currentTime)
+            if 0.0 < d < 1.0:
+                return d
+        except Exception:
+            pass
+        try:
+            return float(self._stream.latency)
+        except Exception:
+            return 0.0
 
     def _finished(self):
         self.playing = False

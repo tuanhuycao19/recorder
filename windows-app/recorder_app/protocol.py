@@ -25,6 +25,8 @@ MSG_STATE = 8
 MSG_PING = 9
 MSG_ERROR = 10
 MSG_FILE_ACK = 11
+MSG_PONG = 12      # ĐT → PC: trả lời PING {pc, ph} để đồng bộ đồng hồ
+MSG_TIMING = 13    # ĐT → PC: {session, t0_ns} thời điểm (đồng hồ ĐT) thu mẫu đầu tiên
 
 MAX_PAYLOAD = 16 * 1024 * 1024
 _HEADER = struct.Struct(">BI")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 import wave
 from pathlib import Path
 from typing import Callable
@@ -41,6 +42,7 @@ class LocalRecorder:
         self.wav_path = Path(wav_path)
         self.on_level = on_level
         self.on_chunk = on_chunk
+        self.t0_ns: int | None = None
         self._q: queue.Queue[bytes | None] = queue.Queue()
         self._stream = None
         self._writer: threading.Thread | None = None
@@ -56,6 +58,15 @@ class LocalRecorder:
             self.sample_rate = int(dev_info["default_samplerate"])
 
         def callback(indata, frames, time_info, status):
+            if self.t0_ns is None:   # thời điểm (perf_counter_ns) mẫu đầu tiên đi vào micro
+                d = 0.0
+                try:
+                    d = float(time_info.currentTime) - float(time_info.inputBufferAdcTime)
+                    if not 0.0 <= d < 1.0:
+                        d = float(self._stream.latency)
+                except Exception:
+                    pass
+                self.t0_ns = time.perf_counter_ns() - int(d * 1e9)
             self._q.put(bytes(indata))
 
         self._stream = sd.RawInputStream(device=self.device, channels=self.channels,

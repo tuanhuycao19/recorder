@@ -12,6 +12,7 @@ import android.content.pm.ServiceInfo;
 import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioRecord;
+import android.media.AudioTimestamp;
 import android.media.MediaRecorder;
 import android.net.wifi.WifiManager;
 import android.os.Build;
@@ -459,6 +460,19 @@ public class RecorderService extends Service {
             case Protocol.MSG_STOP:
                 stopRecording();
                 break;
+            case Protocol.MSG_PING:
+                // Trả lời ngay để PC đồng bộ đồng hồ (đo thời gian khứ hồi)
+                j = Protocol.parse(payload);
+                if (j.has("pc")) {
+                    try {
+                        JSONObject pong = new JSONObject();
+                        pong.put("pc", j.optLong("pc"));
+                        pong.put("ph", System.nanoTime());
+                        sendQueue.offer(Protocol.frame(Protocol.MSG_PONG, pong));
+                    } catch (Exception ignored) {
+                    }
+                }
+                break;
             case Protocol.MSG_FILE_ACK:
                 j = Protocol.parse(payload);
                 onFileAck(j.optString("session", ""), j.optBoolean("ok", false));
@@ -485,6 +499,18 @@ public class RecorderService extends Service {
             st.put("sample_rate", recSampleRate);
             st.put("channels", recChannels);
             sendQueue.offer(Protocol.frame(Protocol.MSG_STATE, st));
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void sendTiming(String session, long t0, boolean approx) {
+        if (!connected) return;
+        try {
+            JSONObject t = new JSONObject();
+            t.put("session", session);
+            t.put("t0_ns", t0);
+            t.put("approx", approx);
+            sendQueue.offer(Protocol.frame(Protocol.MSG_TIMING, t));
         } catch (Exception ignored) {
         }
     }
@@ -583,10 +609,29 @@ public class RecorderService extends Service {
             sendState(true, session);
             setStatus("Đang ghi " + recSampleRate + " Hz " + (recChannels == 2 ? "stereo" : "mono"));
             byte[] buf = new byte[recSampleRate * recChannels * 2 / 50]; // 20 ms
+            long framesRead = 0;
+            boolean timingSent = false;
+            long approxT0 = 0;
+            AudioTimestamp ats = new AudioTimestamp();
             while (!stopRequested) {
                 int n = rec.read(buf, 0, buf.length);
                 if (n < 0) throw new IOException("Lỗi đọc micro (" + n + ")");
                 if (n == 0) continue;
+                if (framesRead == 0) {
+                    approxT0 = System.nanoTime() - (long) (n / (2 * recChannels)) * 1_000_000_000L / recSampleRate;
+                }
+                framesRead += n / (2 * recChannels);
+                if (!timingSent) {
+                    // Thời điểm (đồng hồ monotonic) của mẫu đầu tiên — để PC căn đúng với nhạc đang phát
+                    if (rec.getTimestamp(ats, AudioTimestamp.TIMEBASE_MONOTONIC) == AudioRecord.SUCCESS) {
+                        long t0 = ats.nanoTime - ats.framePosition * 1_000_000_000L / recSampleRate;
+                        sendTiming(session, t0, false);
+                        timingSent = true;
+                    } else if (framesRead > recSampleRate / 2) {
+                        sendTiming(session, approxT0, true);   // máy không hỗ trợ: dùng ước lượng
+                        timingSent = true;
+                    }
+                }
                 wav.write(buf, 0, n);
                 if (connected) sendQueue.offer(Protocol.frame(Protocol.MSG_AUDIO, buf, 0, n)); // bỏ nếu mạng chậm
                 postLevel(buf, n);

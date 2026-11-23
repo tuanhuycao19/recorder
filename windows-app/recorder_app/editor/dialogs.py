@@ -140,6 +140,18 @@ class PreferencesDialog(QDialog):
             if cfg.get("output_device") == idx:
                 self.out_dev.setCurrentIndex(self.out_dev.count() - 1)
         form.addRow("Loa phát", self.out_dev)
+        self.extra_lat = QDoubleSpinBox(suffix=" ms", decimals=1)
+        self.extra_lat.setRange(-2000, 2000)
+        self.extra_lat.setValue(float(cfg.get("extra_latency_ms", 0.0)))
+        self.extra_lat.setToolTip("Dương = kéo bản ghi sớm lên. Dùng khi bản ghi phát kèm vẫn lệch nhịp sau hiệu chỉnh.")
+        form.addRow("Bù độ trễ thêm (chỉnh tay)", self.extra_lat)
+        lat = cfg.get("latency", {})
+        self.reset_lat = QCheckBox("Xoá kết quả hiệu chỉnh độ trễ đã lưu")
+        txt = "\n".join(f"• {k.split(':', 1)[1]}: {v:.1f} ms" for k, v in lat.items()) or "Chưa hiệu chỉnh nguồn nào"
+        lbl = QLabel(txt)
+        lbl.setStyleSheet("color:#555")
+        form.addRow("Độ trễ đã hiệu chỉnh", lbl)
+        form.addRow("", self.reset_lat)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -152,4 +164,5 @@ class PreferencesDialog(QDialog):
 
     def values(self) -> dict:
         return {"output_dir": self.out_dir.text() or str(Path.home()), "bitrate": int(self.bitrate.currentText()),
-                "autosave": self.autosave.isChecked(), "output_device": self.out_dev.currentData()}
+                "autosave": self.autosave.isChecked(), "output_device": self.out_dev.currentData(),
+                "extra_latency_ms": self.extra_lat.value(), "reset_latency": self.reset_lat.isChecked()}

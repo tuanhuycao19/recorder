@@ -60,6 +60,9 @@ class PhoneConnection:
         self.name = f"Điện thoại {addr[0]}"
         self.alive = True
         self.ready = False  # đã nhận HELLO
+        self.clock_offset_ns: int | None = None
+        self.clock_rtt_ns: int | None = None
+        self._clock_samples: list[tuple[int, int, int]] = []
         self.recording = False
         self.session: str | None = None
         self.sample_rate = 48000
@@ -83,6 +86,7 @@ class PhoneConnection:
             self.sock.sendall(data)
 
     def start_recording(self, session: str, sample_rate: int, channels: int) -> None:
+        self.sync_burst(5, 0.02)
         self.send(P.MSG_START, {"session": session, "sample_rate": sample_rate, "channels": channels})
 
     def stop_recording(self) -> None:
@@ -121,9 +125,46 @@ class PhoneConnection:
         while self.alive:
             time.sleep(PING_INTERVAL)
             try:
-                self.send(P.MSG_PING, {})
+                self.send_ping()
             except OSError:
                 break
+
+    # ------------------------------------------------------------ đồng bộ đồng hồ (kiểu NTP)
+    def send_ping(self) -> None:
+        self.send(P.MSG_PING, {"pc": time.perf_counter_ns()})
+
+    def sync_burst(self, n: int = 10, gap: float = 0.03) -> None:
+        """Gửi nhanh vài PING để ước lượng chênh lệch đồng hồ chính xác hơn."""
+        def run():
+            for _ in range(n):
+                if not self.alive:
+                    return
+                try:
+                    self.send_ping()
+                except OSError:
+                    return
+                time.sleep(gap)
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_pong(self, info: dict) -> None:
+        now = time.perf_counter_ns()
+        try:
+            pc, ph = int(info["pc"]), int(info["ph"])
+        except (KeyError, TypeError, ValueError):
+            return
+        rtt = now - pc
+        if rtt < 0:
+            return
+        offset = ph - (pc + now) // 2            # đồng hồ ĐT - đồng hồ PC
+        self._clock_samples.append((rtt, offset, now))
+        self._clock_samples = [s for s in self._clock_samples if now - s[2] < 60e9][-40:]
+        best = min(self._clock_samples)          # mẫu có thời gian khứ hồi ngắn nhất là chính xác nhất
+        self.clock_offset_ns, self.clock_rtt_ns = best[1], best[0]
+
+    def phone_to_pc_ns(self, phone_ns: int) -> int | None:
+        if self.clock_offset_ns is None:
+            return None
+        return phone_ns - self.clock_offset_ns
 
     def _handle(self, msg_type: int, payload: bytes) -> None:
         if msg_type == P.MSG_AUDIO:
@@ -135,6 +176,7 @@ class PhoneConnection:
             self.name = str(info.get("name") or self.name)
             self.ready = True
             self.send(P.MSG_HELLO, {"name": socket.gethostname(), "proto": P.PROTO_VERSION})
+            self.sync_burst()
             self.server.emit("phone_connected", conn=self)
         elif msg_type == P.MSG_STATE:
             self._on_state(P.decode_json(payload))
@@ -146,6 +188,16 @@ class PhoneConnection:
             msg = P.decode_json(payload).get("message", "lỗi không rõ")
             self.server.emit("log", message=f"{self.name}: {msg}")
             self.server.emit("phone_error", conn=self, message=msg)
+        elif msg_type == P.MSG_PONG:
+            self._on_pong(P.decode_json(payload))
+        elif msg_type == P.MSG_TIMING:
+            info = P.decode_json(payload)
+            try:
+                t0 = int(info["t0_ns"])
+            except (KeyError, TypeError, ValueError):
+                return
+            self.server.emit("phone_timing", conn=self, session=str(info.get("session", "")),
+                             t0_pc_ns=self.phone_to_pc_ns(t0), approx=bool(info.get("approx")))
         elif msg_type == P.MSG_PING:
             pass
 

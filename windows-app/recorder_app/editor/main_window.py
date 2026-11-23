@@ -25,6 +25,7 @@ from ..phone_server import PhoneServer, local_ipv4_addresses
 from .. import video as vid
 from . import effects as fx
 from .dialogs import NoiseReductionDialog, PreferencesDialog, ask_params
+from .latency import click_track, measure_lag, overdub_position
 from .model import PROJECT_EXT, Clip, Project
 from .player import Player
 from .widgets import CONTROL_W, Meter, Ruler, TracksPanel, VideoPreview, fmt_time, parse_time
@@ -46,7 +47,8 @@ def default_output_dir() -> Path:
 
 def load_cfg() -> dict:
     cfg = {"output_dir": str(default_output_dir()), "sample_rate": 48000, "channels": 1, "bitrate": 320,
-           "autosave": True, "output_device": None, "source": ""}
+           "autosave": True, "output_device": None, "source": "", "overdub": True,
+           "latency": {}, "extra_latency_ms": 0.0}
     try:
         cfg.update(json.loads(config_path().read_text(encoding="utf-8")))
     except Exception:
@@ -93,6 +95,7 @@ class EditorWindow(QMainWindow):
         self.events: queue.Queue = queue.Queue()
         self.rec: dict | None = None
         self.pending_phone: dict[str, dict] = {}
+        self._timings: dict[str, tuple[int | None, bool]] = {}   # session → (t0 mẫu đầu theo đồng hồ PC, ước lượng?)
         self.noise_profile = None
         self.noise_params: dict = {}
         self.last_effect = None
@@ -158,6 +161,13 @@ class EditorWindow(QMainWindow):
         self.a_end = A("Về cuối", self.go_end, "End", st.standardIcon(QStyle.SP_MediaSkipForward))
         self.a_record = A("Ghi âm", self.record_pressed, "R", record_icon())
         self.a_loop = A("Lặp", None, None, None, checkable=True)
+        self.a_overdub = A("Phát các track khác khi ghi (Overdub)", None, None, None, checkable=True)
+        self.a_overdub.setIconText("🎧 Phát kèm khi ghi")
+        self.a_overdub.setToolTip("Bật: khi ghi âm, các track đã có vẫn phát (thu nhạc, hát theo beat, lồng tiếng).\n"
+                                  "Nên đeo tai nghe để micro không thu lại tiếng loa.")
+        self.a_overdub.setChecked(bool(self.cfg.get("overdub", True)))
+        self.a_overdub.toggled.connect(lambda v: self.cfg.__setitem__("overdub", v))
+        self.a_calib = A("Hiệu chỉnh độ trễ ghi âm...", self.calibrate_latency)
         self.a_loop.setToolTip("Phát lặp lại vùng chọn")
 
         # ---------- chỉnh sửa
@@ -194,6 +204,7 @@ class EditorWindow(QMainWindow):
             tb.addAction(a)
         tb.addSeparator()
         tb.addAction(self.a_loop)
+        tb.addAction(self.a_overdub)
         self.addToolBar(tb)
 
         mt = QToolBar("Đồng hồ mức âm")
@@ -358,8 +369,8 @@ class EditorWindow(QMainWindow):
         m.addAction(self.rec_dock.toggleViewAction())
 
         m = mb.addMenu("&Phát/Ghi")
-        for a in (self.a_play, self.a_loop_play, self.a_pause, self.a_stop, None, self.a_record, None,
-                  self.a_start, self.a_end):
+        for a in (self.a_play, self.a_loop_play, self.a_pause, self.a_stop, None, self.a_record,
+                  self.a_overdub, self.a_calib, None, self.a_start, self.a_end):
             m.addSeparator() if a is None else m.addAction(a)
 
         m = mb.addMenu("T&rack")
@@ -642,7 +653,7 @@ class EditorWindow(QMainWindow):
         p.set_selection(prefix, prefix)
         return t, prefix
 
-    def start_record(self, phone_initiated: dict | None = None):
+    def start_record(self, phone_initiated: dict | None = None, calibrate: dict | None = None):
         if self.is_recording:
             return
         self.player.stop()
@@ -654,7 +665,7 @@ class EditorWindow(QMainWindow):
             t, prefix = self._new_record_track(conn.name, phone_initiated["channels"])
             self.rec = {"kind": "phone", "conn_id": conn.id, "session": phone_initiated["session"], "track": t,
                         "prefix": prefix, "rate_in": phone_initiated["sample_rate"],
-                        "ch_in": phone_initiated["channels"], "label": conn.name}
+                        "ch_in": phone_initiated["channels"], "label": conn.name, "src_key": "phone:" + conn.name}
         else:
             src = self.source_combo.currentData()
             if not src:
@@ -670,7 +681,7 @@ class EditorWindow(QMainWindow):
                                         on_level=lambda v: self.events.put(("local_level", {"level": v})),
                                         on_chunk=lambda b: self.events.put(("local_chunk", {"pcm": b})))
                     self.rec = {"kind": "local", "recorder": rec, "session": session, "track": t, "prefix": prefix,
-                                "label": "May_tinh"}
+                                "label": "May_tinh", "src_key": "local:" + self.source_combo.currentText()}
                     rec.start()
                     self.rec["rate_in"], self.rec["ch_in"] = rec.sample_rate, rec.channels
                 else:
@@ -679,7 +690,8 @@ class EditorWindow(QMainWindow):
                         raise RuntimeError("Điện thoại đã ngắt kết nối")
                     t, prefix = self._new_record_track(conn.name, ch)
                     self.rec = {"kind": "phone", "conn_id": conn.id, "session": session, "track": t,
-                                "prefix": prefix, "rate_in": p.rate, "ch_in": ch, "label": conn.name}
+                                "prefix": prefix, "rate_in": p.rate, "ch_in": ch, "label": conn.name,
+                                "src_key": "phone:" + conn.name}
                     conn.start_recording(session, p.rate, ch)
             except Exception as e:
                 self.rec = None
@@ -687,20 +699,73 @@ class EditorWindow(QMainWindow):
                 p.redo_stack.clear()
                 QMessageBox.critical(self, APP_NAME, f"Không bắt đầu ghi được:\n{e}")
                 return
+        self.rec["calibrate"] = calibrate
+        overdub = self._start_overdub(self.rec["prefix"], force=calibrate is not None)
         self.rec_meter.reset()
         self.a_record.setText("Dừng ghi")
-        self.status(f"Đang ghi từ {self.rec['label']}...", 0)
+        self.status(f"Đang ghi từ {self.rec['label']}" + (" — đang phát kèm các track khác" if overdub else "") + "...",
+                    0)
         self._update_actions()
+
+    def _start_overdub(self, prefix: int, force: bool = False) -> bool:
+        """Phát các track đã có từ vị trí ghi (overdub)."""
+        r = self.rec
+        if not (force or self.a_overdub.isChecked()):
+            return False
+        if not any(t.length > prefix for t in self.project.tracks if not t.recording):
+            return False
+        ok = self.player.play(prefix)
+        r["overdub"] = ok
+        if not ok and self.player.error:
+            self.status(f"Không phát kèm được: {self.player.error}")
+            self.player.error = None
+        return ok
+
+    def _latency_ms(self, src_key: str) -> float:
+        return float(self.cfg.get("latency", {}).get(src_key, 0.0)) + float(self.cfg.get("extra_latency_ms", 0.0))
+
+    def _overdub_place(self, r: dict) -> int | None:
+        """Vị trí đúng của bản ghi trên dòng thời gian (bù độ trễ), hoặc None nếu không ghi kèm phát."""
+        if not r.get("overdub"):
+            return None
+        if "place" in r:
+            return r["place"]
+        dac = r.get("dac_ref")
+        if r["kind"] == "local":
+            t0 = r["recorder"].t0_ns
+        else:
+            t0 = self._timings.get(r["session"], (None, False))[0]
+        if dac is None or t0 is None:
+            return None   # chưa đủ thông tin (thử lại khi nhận file)
+        pos = overdub_position(dac[0], dac[1], t0, self.project.rate, self._latency_ms(r["src_key"]))
+        if abs(pos - r["prefix"]) > self.project.rate * 5:   # lệch vô lý → đồng hồ chưa đồng bộ
+            self.status("⚠ Không đo được độ trễ chính xác, đặt bản ghi tại vị trí bắt đầu ghi")
+            pos = r["prefix"]
+        r["place"] = pos
+        return pos
+
+    def _place_clip(self, t, clip, r: dict) -> None:
+        pos = self._overdub_place(r)
+        if pos is None or clip not in t.clips:
+            return
+        if pos < 0:
+            clip.set_data(clip.data[min(len(clip.data), -pos):])
+            pos = 0
+        clip.offset = pos
 
     def stop_record(self):
         r, self.rec = self.rec, None
         if not r:
             return
         t, clip = r["track"], self._rec_clip(r)
+        if r.get("overdub"):
+            r["dac_ref"] = self.player.dac_ref
+            self.player.stop()
+            self.play_meter.reset()
         if r["kind"] == "local":
             wav = r["recorder"].stop()
             clip.end_recording()
-            self._apply_final(t, clip, wav, r["session"], "May_tinh", replace=True)
+            self._apply_final(t, clip, wav, r["session"], "May_tinh", replace=True, r=r)
         else:
             conn = self.server.connections.get(r["conn_id"])
             if conn:
@@ -722,8 +787,12 @@ class EditorWindow(QMainWindow):
         t, clip = r["track"], self._rec_clip(r)
         if clip.recording:
             clip.end_recording()
+        if r.get("overdub") and "dac_ref" not in r:
+            r["dac_ref"] = self.player.dac_ref
+            self.player.stop()
+        self._place_clip(t, clip, r)
         t.note = "⏳ Đang nhận file gốc từ điện thoại..."
-        self.pending_phone[r["session"]] = {"track": t, "clip": clip, "live": clip.data, "label": r["label"]}
+        self.pending_phone[r["session"]] = {"track": t, "clip": clip, "live": clip.data, "label": r["label"], "r": r}
         self.status("Đã dừng — đang nhận file gốc (chất lượng đầy đủ) từ điện thoại...", 0)
 
     def _append_pcm(self, pcm: bytes):
@@ -740,7 +809,7 @@ class EditorWindow(QMainWindow):
             x = resample(x, rate_in, self.project.rate)
         self._rec_clip(r).append(x)
 
-    def _apply_final(self, t, clip, wav: Path, session: str, label: str, replace: bool):
+    def _apply_final(self, t, clip, wav: Path, session: str, label: str, replace: bool, r: dict | None = None):
         """Thay dữ liệu clip vừa ghi bằng file gốc (WAV không nén) và tự lưu MP3."""
         try:
             data, sr = load_audio(wav)
@@ -756,6 +825,8 @@ class EditorWindow(QMainWindow):
             if data.shape[1] != t.channels:
                 t.channels = data.shape[1]
             clip.set_data(data)
+            if r is not None:
+                self._place_clip(t, clip, r)
         elif t is None:
             self.project.add_track(f"{label} {session}", data)
         if t is not None:
@@ -763,6 +834,9 @@ class EditorWindow(QMainWindow):
         self.project.modified = True
         self.project.changed("data")
         self.status(f"Đã ghi xong {fmt_time(len(data) / self.project.rate)}")
+        if r is not None and r.get("calibrate"):
+            self._finish_calibration(t, r)
+            return
         if self.cfg.get("autosave", True):
             out = Path(self.cfg["output_dir"]) / f"{session}_{safe_name(label)}.mp3"
             self._save_async(data, self.project.rate, out)
@@ -777,6 +851,75 @@ class EditorWindow(QMainWindow):
             except Exception as e:
                 self.events.put(("save_failed", {"error": str(e)}))
         threading.Thread(target=work, daemon=True).start()
+
+    # ================================================================== hiệu chỉnh độ trễ
+    def calibrate_latency(self):
+        if self.is_recording or not self._can_edit():
+            return
+        src = self.source_combo.currentData()
+        if not src:
+            QMessageBox.information(self, APP_NAME, "Hãy chọn nguồn thu (micro hoặc điện thoại) trước.")
+            return
+        if QMessageBox.question(
+                self, "Hiệu chỉnh độ trễ",
+                f"Nguồn thu: {self.source_combo.currentText()}\n\n"
+                "App sẽ phát khoảng 7 giây tiếng \"tách\" qua loa và ghi lại bằng nguồn thu này để đo độ trễ.\n\n"
+                "• Tạm thời KHÔNG dùng tai nghe — để micro/điện thoại gần loa (30–50 cm)\n"
+                "• Bật loa vừa đủ nghe, giữ yên lặng\n\nBắt đầu?",
+                QMessageBox.Ok | QMessageBox.Cancel) != QMessageBox.Ok:
+            return
+        p = self.project
+        info = {"snap": p.snapshot("Hiệu chỉnh"), "undo_len": len(p.undo_stack), "redo": list(p.redo_stack),
+                "modified": p.modified}
+        clicks = click_track(p.rate)
+        ct = p.add_track("Tiếng tách (hiệu chỉnh)", clicks, undo=False, select=False)
+        ct.solo = True
+        p.set_selection(0, 0)
+        info["clicks"] = clicks
+        self.start_record(calibrate=info)
+        if not self.rec:
+            self._end_calibration(info)
+            return
+        QTimer.singleShot(int(len(clicks) / p.rate * 1000) + 800,
+                          lambda: self.rec and self.rec.get("calibrate") is info and self.stop_record())
+
+    def _end_calibration(self, info: dict):
+        p = self.project
+        p._restore(info["snap"])
+        del p.undo_stack[info["undo_len"]:]
+        p.redo_stack = info["redo"]
+        p.modified = info["modified"]
+        p.changed("tracks")
+
+    def _finish_calibration(self, t, r: dict):
+        info = r["calibrate"]
+        rate = self.project.rate
+        clicks = info["clicks"]
+        recorded = t.render(0, len(clicks)) if t is not None else np.zeros_like(clicks)
+        lag, clarity = measure_lag(clicks, recorded, rate)
+        self._end_calibration(info)
+        key = r["src_key"]
+        name = key.split(":", 1)[1]
+        if not r.get("overdub") or r.get("dac_ref") is None:
+            QMessageBox.warning(self, "Hiệu chỉnh độ trễ", "Không phát được tiếng tách qua loa — kiểm tra loa/thiết bị phát.")
+            return
+        if clarity < 2.0:
+            QMessageBox.warning(self, "Hiệu chỉnh độ trễ",
+                                f"Không nghe rõ tiếng tách trong bản ghi từ {name}.\n"
+                                "Hãy tăng âm lượng loa, đặt micro/điện thoại gần loa hơn và thử lại.")
+            return
+        old = float(self.cfg.setdefault("latency", {}).get(key, 0.0))
+        new = old + lag * 1000.0 / rate
+        self.cfg["latency"][key] = round(new, 1)
+        self._save_cfg()
+        approx = self._timings.get(r["session"], (None, False))[1] if r["kind"] == "phone" else False
+        QMessageBox.information(
+            self, "Hiệu chỉnh độ trễ",
+            f"Đã đo xong cho {name}.\n\nĐộ lệch đo được: {lag * 1000.0 / rate:+.1f} ms\n"
+            f"Bù độ trễ đã lưu: {new:.1f} ms\n\n"
+            "Từ giờ bản ghi khi phát kèm sẽ tự khớp nhịp với các track khác."
+            + ("\n\n⚠ Điện thoại này không báo thời điểm thu chính xác, độ lệch có thể dao động vài chục ms."
+               if approx else ""))
 
     # ================================================================== sự kiện (luồng nền → giao diện)
     def _tick(self):
@@ -872,6 +1015,8 @@ class EditorWindow(QMainWindow):
             self.progress.show()
         elif name == "phone_file_progress":
             self.progress.setValue(int(kw["received"] * 100 / max(1, kw["total"])))
+        elif name == "phone_timing":
+            self._timings[kw["session"]] = (kw["t0_pc_ns"], kw["approx"])
         elif name == "phone_recording_done":
             self.progress.hide()
             pend = self.pending_phone.pop(kw["session"], None)
@@ -880,7 +1025,7 @@ class EditorWindow(QMainWindow):
                 return
             unchanged = pend["clip"].data is pend["live"]
             self._apply_final(pend["track"], pend["clip"], kw["wav_path"], kw["session"], pend["label"],
-                              replace=unchanged)
+                              replace=unchanged, r=pend.get("r"))
             if kw["source"] != "file":
                 self.status("⚠ Không nhận được file gốc, đã dùng bản truyền trực tiếp")
         elif name == "phone_recording_failed":
@@ -1425,7 +1570,10 @@ class EditorWindow(QMainWindow):
     def preferences(self):
         dlg = PreferencesDialog(self, self.cfg, list_output_devices())
         if dlg.exec():
-            self.cfg.update(dlg.values())
+            vals = dlg.values()
+            if vals.pop("reset_latency"):
+                self.cfg["latency"] = {}
+            self.cfg.update(vals)
             self.player.device = self.cfg["output_device"]
             self._save_cfg()
             self.refresh_recordings()
